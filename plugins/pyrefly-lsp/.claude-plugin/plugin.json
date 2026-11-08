@@ -1,6 +1,6 @@
 {
   "name": "pyrefly-lsp",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Python LSP на pyrefly: навигация с полными ссылками и исходящими вызовами, сверка с диском, worktree без .venv. Бинарник ставится отдельно: uv tool install pyrefly.",
   "author": {
     "name": "ilkruglov"
