@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "pyrefly-lsp",
+  "description": "Языковой сервер Python на pyrefly для Claude Code: навигация и диагностика тем же движком, что pyrefly check.",
+  "owner": {
+    "name": "ilkruglov"
+  },
+  "plugins": [
+    {
+      "name": "pyrefly-lsp",
+      "source": "./plugins/pyrefly-lsp",
+      "description": "Python LSP на pyrefly: переход к определению, поиск ссылок, подсказки типов и диагностика.",
+      "version": "0.1.0",
+      "category": "development"
+    }
+  ]
+}

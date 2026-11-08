@@ -1,0 +1,11 @@
+{
+  "name": "pyrefly-lsp",
+  "version": "0.1.0",
+  "description": "Python LSP на pyrefly (`pyrefly lsp`): навигация и диагностика тем же движком, что pyrefly check. Бинарник ставится отдельно: uv tool install pyrefly.",
+  "author": {
+    "name": "ilkruglov"
+  },
+  "repository": "https://github.com/ilkruglov/pyrefly-lsp",
+  "license": "Apache-2.0",
+  "keywords": ["python", "lsp", "pyrefly", "type-checker", "language-server"]
+}
