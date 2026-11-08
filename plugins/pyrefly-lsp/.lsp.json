@@ -1,7 +1,23 @@
 {
   "pyrefly": {
-    "command": "pyrefly",
-    "args": ["lsp"],
-    "extensionToLanguage": { ".py": "python", ".pyi": "python" }
+    "command": "python3",
+    "args": [
+      "-I",
+      "${CLAUDE_PLUGIN_ROOT}/scripts/pyrefly_lsp_proxy.py"
+    ],
+    "extensionToLanguage": {
+      ".py": "python",
+      ".pyi": "python"
+    },
+    "env": {
+      "PYREFLY_LSP_TYPE_CHECKING_MODE": "${user_config.type_checking_mode}",
+      "PYREFLY_LSP_DIAGNOSTICS": "${user_config.diagnostics}",
+      "PYREFLY_LSP_SYNC_FROM_DISK": "${user_config.sync_from_disk}",
+      "PYREFLY_LSP_COMPLETE_OUTGOING_CALLS": "${user_config.complete_outgoing_calls}",
+      "PYREFLY_LSP_PYREFLY": "${user_config.pyrefly_path}",
+      "PYREFLY_LSP_INDEXING_LIMIT": "${user_config.indexing_limit}"
+    },
+    "workspaceFolder": "${CLAUDE_PROJECT_DIR}",
+    "startupTimeout": 120000
   }
 }

@@ -1,0 +1,23 @@
+# Только инструменты разработки плагина: сам плагин — скрипт без зависимостей.
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+extend-select = ["E4", "E7", "B", "UP", "SIM", "RUF", "C4", "PT", "RET", "PERF", "PLE", "PLW"]
+# Русский текст: кириллица в строках, docstring и комментариях — не путаница символов.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.format]
+exclude = ["**/*.md"]
+
+[tool.pyrefly]
+project-includes = ["plugins/pyrefly-lsp/scripts", "tests"]
+search-path = ["plugins/pyrefly-lsp/scripts", "tests"]
+python-version = "3.9"
+# Тесты идут через `uvx pytest`: своего окружения с pytest у репозитория нет.
+ignore-missing-imports = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

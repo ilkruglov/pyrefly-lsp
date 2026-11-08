@@ -9,8 +9,8 @@
     {
       "name": "pyrefly-lsp",
       "source": "./plugins/pyrefly-lsp",
-      "description": "Python LSP на pyrefly: переход к определению, поиск ссылок, подсказки типов и диагностика.",
-      "version": "0.1.0",
+      "description": "Python LSP на pyrefly: полные ссылки и исходящие вызовы, сверка с диском, worktree без .venv, ошибки типов тем же движком, что pyrefly check.",
+      "version": "0.2.0",
       "category": "development"
     }
   ]
