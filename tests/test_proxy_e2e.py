@@ -1,4 +1,4 @@
-"""Сквозные тесты: настоящий pyrefly за прослойкой, клиент ведёт себя как Claude Code."""
+"""End-to-end tests: real pyrefly behind the proxy, and a client that behaves like Claude Code."""
 
 from __future__ import annotations
 
@@ -62,8 +62,8 @@ def test_outgoing_calls_left_to_server_when_disabled(
     root = make_project({"m.py": M_PY, "b.py": "def old_func() -> int:\n    return 1\n"})
     client = client_factory(root, env={"PYREFLY_LSP_COMPLETE_OUTGOING_CALLS": "false"})
     uri = client.open("m.py")
-    # Без достройки ответ — только то, что нашёл сам pyrefly (на 1.4.1 он теряет `return a() + b()`,
-    # facebook/pyrefly#5486); лишнего прослойка не добавляет.
+    # Without completion the reply is only what pyrefly found itself (1.4.1 loses `return a() + b()`,
+    # facebook/pyrefly#5486); the proxy adds nothing extra.
     assert set(_outgoing(client, uri, M_PY, "scaller")) <= {"helper×2", "helper×1"}
 
 
@@ -188,7 +188,7 @@ def test_deleted_open_module_is_gone_for_the_server(
     client.open("c.py")
     client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
     (root / "c.py").unlink()
-    time.sleep(2.5)  # фоновая сверка
+    time.sleep(2.5)  # background sync
     definition = client.request(
         "textDocument/definition", {"textDocument": {"uri": uri}, "position": position(text, "X = c_one", 4)}
     )
@@ -224,7 +224,7 @@ def test_unopened_file_changed_on_disk_is_seen(
     client = client_factory(root)
     client.open("m.py")
     client.request("textDocument/documentSymbol", {"textDocument": {"uri": (root / "m.py").as_uri()}})
-    # Файл дописан мимо Claude (git pull, другой агент, форматтер) — Claude Code об этом серверу не сообщает.
+    # The file is appended outside Claude (git pull, another agent, a formatter); Claude Code doesn't tell the server.
     with open(root / "b.py", "a") as fh:
         fh.write("\n\ndef new_func() -> int:\n    return 2\n")
     text = "from b import old_func, new_func\n\nX = old_func()\nY = new_func()\n"
@@ -249,7 +249,7 @@ def test_disk_change_reaches_server_before_the_next_request(
     client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
     with open(root / "b.py", "a") as fh:
         fh.write("\n\ndef new_func() -> int:\n    return 2\n")
-    # Как в жизни: между правкой на диске и следующим вызовом Claude проходят секунды.
+    # As in real use: seconds pass between the disk edit and Claude's next call.
     time.sleep(2.5)
     text = "from b import old_func, new_func\n\nX = old_func()\nY = new_func()\n"
     mark = time.time()
@@ -274,7 +274,7 @@ def test_open_file_changed_on_disk_is_seen(
         fh.write("\n\ndef c_two() -> int:\n    return 2\n")
     after = client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
     assert [s["name"] for s in after] == ["c_one", "c_two"]
-    # Дальше Claude правит тот же файл — версии документа у сервера не должны сломаться.
+    # Then Claude edits the same file: the server's document versions must not break.
     uri = client.edit("c.py", "def c_one() -> int:\n    return 1\n\n\ndef c_three() -> int:\n    return 3\n")
     final = client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
     assert [s["name"] for s in final] == ["c_one", "c_three"]
@@ -315,7 +315,7 @@ def test_diagnostics_reported_by_default_and_dropped_when_disabled(
     quiet.edit("m.py", bad)
     time.sleep(3)
     assert quiet.published(since=mark) == 0
-    # Навигация при этом работает.
+    # Navigation still works.
     assert quiet.request("textDocument/documentSymbol", {"textDocument": {"uri": (off / "m.py").as_uri()}})
 
 
@@ -362,13 +362,13 @@ def test_proxy_exits_when_client_goes_away(make_project: Callable[..., Path]) ->
     assert client.proc.stdin is not None
     client.proc.stdin.close()
     client.proc.wait(timeout=15)
-    # Обычное завершение сессии — не падение: код 0.
+    # A normal end of the session is not a crash: exit code 0.
     assert client.proc.returncode == 0
 
 
 def test_proxy_is_isolated_from_the_project_pythonpath(make_project: Callable[..., Path]) -> None:
-    # Пользователь запустил Claude с PYTHONPATH=. — а в проекте лежит json.py.
-    root = make_project({"json.py": "raise SystemExit('подменённый json')\n", "m.py": "x = 1\n"})
+    # The user started Claude with PYTHONPATH=. and the project has a json.py.
+    root = make_project({"json.py": "raise SystemExit('shadowed json')\n", "m.py": "x = 1\n"})
     lsp = json.loads((Path(__file__).resolve().parents[1] / "plugins" / "pyrefly-lsp" / ".lsp.json").read_text())
     args = [a.replace("${CLAUDE_PLUGIN_ROOT}", str(PROXY.parents[1])) for a in lsp["pyrefly"]["args"]]
     client = LspClient(root, env={"PYTHONPATH": str(root)}, command=[sys.executable, *args])

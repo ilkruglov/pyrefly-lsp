@@ -1,4 +1,4 @@
-"""Общее для тестов: путь к прослойке, LSP-клиент как у Claude Code, временные проекты."""
+"""Shared test helpers: the proxy path, an LSP client that behaves like Claude Code, temporary projects."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ SCRIPTS = ROOT / "plugins" / "pyrefly-lsp" / "scripts"
 PROXY = SCRIPTS / "pyrefly_lsp_proxy.py"
 sys.path.insert(0, str(SCRIPTS))
 
-# Возможности клиента, которые Claude Code 2.1.319 объявляет в initialize (сняты из живого лога):
-# слежения за файлами и workspace/configuration нет — ровно те условия, ради которых прослойка.
+# Client capabilities that Claude Code 2.1.319 announces in initialize (taken from a live log):
+# no file watching and no workspace/configuration: exactly the conditions the proxy exists for.
 CLAUDE_CODE_CAPABILITIES: dict[str, Any] = {
     "workspace": {
         "configuration": False,
@@ -45,11 +45,11 @@ CLAUDE_CODE_CAPABILITIES: dict[str, Any] = {
     "general": {"positionEncodings": ["utf-16"]},
 }
 
-needs_pyrefly = pytest.mark.skipif(shutil.which("pyrefly") is None, reason="pyrefly не установлен")
+needs_pyrefly = pytest.mark.skipif(shutil.which("pyrefly") is None, reason="pyrefly is not installed")
 
 
 class LspClient:
-    """Клиент LSP, который ведёт себя как Claude Code: шлёт полный текст в didChange, не следит за диском."""
+    """LSP client that behaves like Claude Code: sends full text in didChange, does not watch the disk."""
 
     def __init__(self, root: Path, env: dict[str, str] | None = None, command: list[str] | None = None) -> None:
         self.root = root
@@ -106,7 +106,7 @@ class LspClient:
             if time.time() > deadline:
                 raise TimeoutError(method)
             if self.proc.poll() is not None and rid not in self.responses:
-                raise RuntimeError(f"прослойка завершилась с кодом {self.proc.returncode}: {self.stderr()}")
+                raise RuntimeError(f"the proxy exited with code {self.proc.returncode}: {self.stderr()}")
             time.sleep(0.01)
         msg = self.responses.pop(rid)
         if "error" in msg:
@@ -145,7 +145,7 @@ class LspClient:
         return uri
 
     def edit(self, rel: str, text: str) -> str:
-        """Как Edit в Claude Code: пишет файл на диск, затем шлёт didChange с полным текстом и didSave."""
+        """Like Edit in Claude Code: writes the file to disk, then sends didChange with the full text and didSave."""
         path = self.root / rel
         path.write_text(text)
         uri = path.as_uri()
@@ -196,7 +196,7 @@ def position(text: str, needle: str, offset: int = 0) -> dict[str, int]:
 
 
 def target_files(result: Any) -> list[str]:
-    """Имена файлов из ответа definition: Location, Location[] или LocationLink[]."""
+    """File names from a definition reply: Location, Location[] or LocationLink[]."""
     if isinstance(result, dict):
         result = [result]
     return [Path((r.get("uri") or r.get("targetUri", "")).removeprefix("file://")).name for r in result or []]
@@ -216,7 +216,7 @@ def init_repo(path: Path) -> Path:
 
 @pytest.fixture
 def make_project(tmp_path: Path) -> Callable[..., Path]:
-    """Проект с [tool.pyrefly]: make_project({"m.py": "..."}) → корень."""
+    """A project with [tool.pyrefly]: make_project({"m.py": "..."}) returns its root."""
 
     def build(files: dict[str, str], name: str = "proj") -> Path:
         root = tmp_path / name

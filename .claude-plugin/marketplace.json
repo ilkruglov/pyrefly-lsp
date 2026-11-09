@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "pyrefly-lsp",
-  "description": "Языковой сервер Python на pyrefly для Claude Code: навигация и диагностика тем же движком, что pyrefly check.",
+  "description": "Python language server on pyrefly for Claude Code: navigation and diagnostics from the same engine as pyrefly check.",
   "owner": {
     "name": "ilkruglov"
   },
@@ -9,8 +9,8 @@
     {
       "name": "pyrefly-lsp",
       "source": "./plugins/pyrefly-lsp",
-      "description": "Python LSP на pyrefly: полные ссылки и исходящие вызовы, сверка с диском, worktree без .venv, ошибки типов тем же движком, что pyrefly check.",
-      "version": "1.0.0",
+      "description": "Python LSP on pyrefly: complete references and outgoing calls, sync with disk, worktrees without .venv, type errors from the same engine as pyrefly check.",
+      "version": "1.0.1",
       "category": "development"
     }
   ]

@@ -1,161 +1,42 @@
 # pyrefly-lsp
 
-Плагин для Claude Code: языковой сервер Python на [pyrefly](https://pyrefly.org). Даёт Claude
-навигацию по коду и ошибки типов тем же движком, что `pyrefly check`.
+A Claude Code plugin that runs [pyrefly](https://pyrefly.org) as the Python language server, with a proxy that
+keeps the server in sync with the disk and completes outgoing calls. Claude gets code navigation and type
+errors from the same engine as `pyrefly check`.
 
-Клиент LSP в Claude Code не следит за файлами, сообщает серверу только о своих правках и не
-передаёт ему настроек. Поэтому сервер, подключённый напрямую, после правки мимо Claude (git,
-форматтер, другой агент) до конца сессии работает со старым кодом. В этом плагине между Claude
-Code и `pyrefly lsp` стоит прослойка — скрипт на Python без зависимостей. Она держит сервер в
-курсе диска и достраивает то, что pyrefly отдаёт не полностью.
+Documentation, a comparison with other Python language servers, settings and limitations are in the plugin
+README: [plugins/pyrefly-lsp/README.md](plugins/pyrefly-lsp/README.md). Changes: [CHANGELOG.md](CHANGELOG.md).
 
-## Сравнение
+This is a community plugin. It is not affiliated with or endorsed by Meta or the pyrefly team.
 
-Что получает Claude от разных Python LSP в одних и тех же условиях — так, как с сервером
-работает Claude Code. Готовые плагины есть для pyright (официальный `pyright-lsp`) и ty
-(`astral` от Astral); остальные серверы пришлось бы подключать своим плагином.
-
-| | pyrefly-lsp | pyright-lsp | astral (ty) | basedpyright | zuban | jedi, pylsp |
-|---|---|---|---|---|---|---|
-| Ошибки типов | pyrefly, как `pyrefly check` | pyright | ty (бета) | basedpyright | zuban | типы не проверяют |
-| Первый поиск ссылок после открытия файла¹ | 718 в 57 файлах | 14 в 1 файле | 718 в 57 файлах | 14 в 1 файле | 490 в 57 файлах | 240 в 22 файлах |
-| Исходящие вызовы, включая `await f()` и `f() + g()` | полные | полные | полные | полные | нет | нет |
-| Реализации: через наследование / метода Protocol | да / нет | нет / нет | да / нет | да / да | нет / нет | нет / нет |
-| Библиотеки из `.venv` проекта без настройки | видит | не видит | видит | видит | видит | не видит |
-| Функция, дописанная мимо Claude в неоткрытый файл | видит | не видит, ложная ошибка | не видит, ложная ошибка | не видит, ложная ошибка | видит | видит |
-| Открытый файл, изменённый мимо Claude | новый текст | старый текст | старый текст | старый текст | старый текст | старый текст |
-| git worktree без своего `.venv` | библиотеки из `.venv` основной копии | библиотек не видит | библиотек не видит | библиотек не видит | библиотек не видит | библиотек не видит |
-
-¹ pyright и basedpyright находят все 719 ссылок, когда достроят индекс: повторный запрос через
-15 с уже полный. У остальных повторный запрос даёт то же число.
-
-Что из этого следует:
-
-- Навигация у ty почти та же, но правок мимо Claude и worktree без `.venv` он не видит, а
-  ошибки типов даёт по своим правилам, а не по правилам `pyrefly check`.
-- Реализации методов Protocol находит только basedpyright.
-- Открытый файл, изменённый мимо Claude, сам не перечитывает ни один сервер: по протоколу для
-  открытого файла сервер верит тексту от клиента. Это закрывает только прослойка.
-
-Как мерили (9 ноября 2026). Стенд шлёт серверу те же сообщения, что Claude Code 2.1.319: его
-возможности клиента сняты из журнала — без слежения за файлами и без настроек; правка пишется
-в файл, и серверу уходит `didChange` с полным текстом. Ссылки — на класс в проекте из 505
-файлов Python. Вызовы, реализации и правки мимо Claude — на проекте из трёх файлов.
-Библиотеки — переход к `FastAPI` в проекте с `.venv` и к `torch` в git worktree без своего
-`.venv`. Версии: pyrefly 1.4.1, pyright 1.1.414, ty 0.0.99, basedpyright 1.40.2, zuban 0.10.2,
-jedi-language-server 0.47.0, python-lsp-server 1.15.0.
-
-## Как устроена прослойка
-
-- **Индексация** — `pyrefly lsp --indexing-mode lazy-blocking`: первый запрос ждёт индекс,
-  поэтому ответ полный.
-- **Исходящие вызовы** — pyrefly теряет вызовы внутри `await` и выражений
-  ([#5486](https://github.com/facebook/pyrefly/issues/5486)). Прослойка разбирает тело функции
-  через `ast`, для каждого вызова спрашивает у pyrefly определение и объединяет найденное с
-  ответом сервера.
-- **Сверка с диском** — в фоне раз в секунду (если обход дерева медленный — реже, не чаще
-  чем через 10 его длительностей) и перед каждым запросом Claude: изменённые неоткрытые
-  файлы уходят серверу как `workspace/didChangeWatchedFiles`, в открытые подставляется текст с
-  диска. Отслеживаются `.py`, `.pyi` и конфиги, которые читает pyrefly: `pyproject.toml`,
-  `pyrefly.toml`, `mypy.ini`, `setup.cfg`, `pyrightconfig.json`. Список файлов —
-  `git ls-files` (около 5 мс на 600 файлов), вне git — обход каталогов без виртуальных окружений.
-- **worktree** — если у проекта нет своего `.venv`, серверу передаётся `pythonPath`: корня
-  worktree (проект — его подкаталог), затем основной копии — того же подкаталога
-  (монорепозиторий), затем корня. В том же порядке прослойка ищет бинарник `pyrefly`.
-- **Большие деревья** — за неоткрытыми файлами прослойка следит, только если под git не больше
-  50 000 файлов `.py`, `.pyi` и конфигов, а вне git в дереве не больше 20 000 записей. На дереве крупнее
-  сверяются лишь открытые документы, в журнале будет строка об этом.
-
-## Требования
-
-- Claude Code 2.1.271 или новее (выбор значения в настройках плагина).
-- `python3` 3.9+ в PATH — им запускается прослойка (на более старом она сообщит об этом в журнал).
-- `pyrefly`: в `.venv` проекта (например, как dev-зависимость) или в PATH —
-  `uv tool install pyrefly`. Проверено с 1.4.1.
-
-## Установка
+## Install
 
 ```bash
 claude plugin marketplace add ilkruglov/pyrefly-lsp
 claude plugin install pyrefly-lsp@pyrefly-lsp
 ```
 
-Чтобы включать сервер только в нужных проектах, выключите его глобально и включите в проекте:
+You also need `python3` 3.9+ and `pyrefly` (`uv tool install pyrefly`).
+
+## Repository layout
+
+- `plugins/pyrefly-lsp/`: the plugin itself: its manifest, the server config and the proxy
+  `scripts/pyrefly_lsp_proxy.py`.
+- `tests/`: unit tests for the proxy and end-to-end tests with real pyrefly.
+- `.claude-plugin/marketplace.json`: a marketplace with this one plugin.
+
+## Development
 
 ```bash
-claude plugin disable pyrefly-lsp@pyrefly-lsp -s user
-cd ~/my-project && claude plugin enable pyrefly-lsp@pyrefly-lsp -s local
-```
-
-В проекте с этим плагином выключите `pyright-lsp`: на расширение `.py` работает только один
-сервер — тот, что зарегистрирован первым.
-
-### Обновление
-
-```bash
-claude plugin marketplace update pyrefly-lsp
-claude plugin update pyrefly-lsp@pyrefly-lsp
-```
-
-Новая версия подхватится в следующей сессии Claude Code. Что изменилось — в
-[CHANGELOG.md](CHANGELOG.md).
-
-## Настройки
-
-`/config` или `/plugin configure pyrefly-lsp@pyrefly-lsp`:
-
-| Настройка | По умолчанию | Что делает |
-|---|---|---|
-| Режим проверки без конфига pyrefly | `auto` | Для файлов без `pyrefly.toml` или `[tool.pyrefly]`. `auto` — перенести настройки mypy/pyright, иначе пресет `basic`; `default`, `strict`, `all` — строже; `off` — без ошибок. Конфиг проекта главнее |
-| Ошибки типов после правок | вкл. | Выключите, если их уже даёт хук линтера: навигация останется |
-| Сверка с диском | вкл. | Выключайте только для поиска неисправностей |
-| Полные исходящие вызовы | вкл. | Выключайте только для поиска неисправностей |
-| Путь к pyrefly | — | По умолчанию `.venv` проекта (для worktree — основной копии), затем PATH |
-| Предел индексации | 0 | Сколько файлов проекта индексирует pyrefly; 0 — его предел (2000). Больше — полнее поиск ссылок на больших проектах, но больше памяти: около 0,5 ГБ на 600 файлов |
-
-## Настройка проекта
-
-pyrefly сам находит `.venv` проекта. Корни импортов, пресет и исключения задаются в
-`[tool.pyrefly]` файла `pyproject.toml` (или в `pyrefly.toml`):
-
-```toml
-[tool.pyrefly]
-project-includes = ["src", "tests"]
-search-path = ["src"]
-python-version = "3.12"
-preset = "default"
-```
-
-## Ограничения
-
-- Реализации метода Protocol не находятся: pyrefly ищет только реализации через наследование.
-- pyrefly индексирует не больше 2000 файлов проекта (настройка «Предел индексации»): на проекте
-  крупнее поиск ссылок по остальным файлам неполный.
-- Ошибки типов Claude Code прикрепляет к следующему вызову инструмента, а не к самой правке.
-- Зависимые файлы pyrefly перепроверяет в фоне. Если правка мимо Claude найдена прямо перед
-  запросом, прослойка ждёт, пока сервер перестанет публиковать ошибки (до 3 с).
-- Открытые документы Claude Code не закрывает, поэтому прослойка сверяет их с диском всю сессию.
-- Для открытых документов истина — диск. Текст из `didChange`, которого нет на диске, при
-  следующей сверке заменится текстом с диска. Claude Code правит сами файлы, поэтому его это
-  не задевает; клиент с несохранёнными правками (редактор) так работать не будет.
-- Достройка исходящих вызовов разбирает код через `ast` того `python3`, которым запущена
-  прослойка: синтаксис новее его версии (например, `def f[T]` при python3 3.11) она не разберёт и
-  оставит для такого файла только ответ pyrefly — об этом будет строка в журнале.
-- Проверено на Linux с Python 3.12. Python 3.9 и Windows не проверялись запуском.
-
-## Разработка
-
-```bash
-uvx pytest                 # модульные и сквозные тесты; сквозным нужен pyrefly в PATH
+uvx pytest                 # unit and end-to-end tests; the end-to-end ones need pyrefly on PATH
 ruff check . && ruff format --check .
 pyrefly check
-claude plugin validate . && claude plugin validate plugins/pyrefly-lsp
+claude plugin validate . && claude plugin validate --strict plugins/pyrefly-lsp
 ```
 
-Проверить плагин в живой сессии без установки:
-`claude --plugin-dir plugins/pyrefly-lsp`. Журнал прослойки пишется в stderr сервера
-(`claude --debug`).
+To try the plugin in a live session without installing it: `claude --plugin-dir plugins/pyrefly-lsp`. The
+proxy logs to the server's stderr (`claude --debug`).
 
-## Лицензия
+## License
 
-Apache-2.0, см. [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](LICENSE).

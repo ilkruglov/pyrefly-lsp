@@ -1,7 +1,7 @@
 {
   "name": "pyrefly-lsp",
-  "version": "1.0.0",
-  "description": "Python LSP на pyrefly: навигация с полными ссылками и исходящими вызовами, сверка с диском, worktree без .venv. Бинарник ставится отдельно: uv tool install pyrefly.",
+  "version": "1.0.1",
+  "description": "Python LSP on pyrefly: complete find-references and outgoing calls, sync with disk, git worktrees without their own .venv. Install the pyrefly binary separately: uv tool install pyrefly.",
   "author": {
     "name": "ilkruglov"
   },
@@ -18,8 +18,8 @@
   "userConfig": {
     "type_checking_mode": {
       "type": "string",
-      "title": "Режим проверки без конфига pyrefly",
-      "description": "Для файлов, которые не покрывает pyrefly.toml или [tool.pyrefly]: auto — перенести настройки mypy/pyright, иначе пресет basic; default, strict, all — строже; off — без ошибок. Конфиг проекта всегда главнее.",
+      "title": "Type-checking mode without a pyrefly config",
+      "description": "For files not covered by pyrefly.toml or [tool.pyrefly]: auto migrates mypy/pyright settings, otherwise uses the basic preset; default, strict and all are stricter; off reports no errors. The project config always wins.",
       "options": [
         "auto",
         "off",
@@ -33,32 +33,32 @@
     },
     "diagnostics": {
       "type": "boolean",
-      "title": "Ошибки типов после правок",
-      "description": "Передавать Claude ошибки pyrefly после каждой правки. Выключите, если их уже даёт хук линтера: навигация останется.",
+      "title": "Type errors after edits",
+      "description": "Pass pyrefly errors to Claude after each edit. Turn off if a linter hook already reports them: navigation keeps working.",
       "default": true
     },
     "sync_from_disk": {
       "type": "boolean",
-      "title": "Сверка с диском",
-      "description": "Сообщать серверу о файлах, изменённых мимо Claude (git, форматтер, другой агент). Выключайте только для поиска неисправностей.",
+      "title": "Sync with disk",
+      "description": "Tell the server about files changed outside Claude (git, a formatter, another agent). Turn off only for troubleshooting.",
       "default": true
     },
     "complete_outgoing_calls": {
       "type": "boolean",
-      "title": "Полные исходящие вызовы",
-      "description": "Достраивать вызовы, которые pyrefly теряет внутри await и выражений (facebook/pyrefly#5486). Выключайте только для поиска неисправностей.",
+      "title": "Complete outgoing calls",
+      "description": "Add the calls pyrefly loses inside await and expressions (facebook/pyrefly#5486). Turn off only for troubleshooting.",
       "default": true
     },
     "pyrefly_path": {
       "type": "string",
-      "title": "Путь к pyrefly",
-      "description": "Необязательно. По умолчанию — .venv проекта (для worktree — основной копии), затем PATH.",
+      "title": "Path to pyrefly",
+      "description": "Optional. By default: the project's .venv (for a git worktree, the main checkout's), then PATH.",
       "default": ""
     },
     "indexing_limit": {
       "type": "number",
-      "title": "Предел индексации",
-      "description": "Сколько файлов проекта индексирует pyrefly для поиска ссылок. 0 — его предел по умолчанию (2000). Больше — полнее поиск на больших проектах, но больше памяти.",
+      "title": "Indexing limit",
+      "description": "How many project files pyrefly indexes for find-references. 0 keeps its default (2000). Higher gives more complete search on large projects but uses more memory.",
       "default": 0,
       "min": 0
     }

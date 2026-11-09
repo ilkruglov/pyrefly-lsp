@@ -1,4 +1,4 @@
-"""Модульные тесты прослойки: без pyrefly, только логика."""
+"""Unit tests for the proxy: no pyrefly, logic only."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import pyrefly_lsp_proxy as proxy
 import pytest
 from conftest import git, init_repo
 
-NOT_ROOT = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="под root chmod(0) не мешает чтению")
+NOT_ROOT = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can read despite chmod(0)")
 
 
 def test_message_roundtrip() -> None:
-    msg = {"jsonrpc": "2.0", "id": 1, "method": "x", "params": {"text": "Привет 🙂"}}
+    msg = {"jsonrpc": "2.0", "id": 1, "method": "x", "params": {"text": "Grüße 🙂"}}
     stream = io.BytesIO(proxy.encode(msg) + proxy.encode({"jsonrpc": "2.0", "method": "y"}))
     assert proxy.read_message(stream) == msg
     assert proxy.read_message(stream) == {"jsonrpc": "2.0", "method": "y"}
@@ -27,8 +27,8 @@ def test_apply_full_change() -> None:
 
 
 def test_apply_incremental_change_counts_utf16() -> None:
-    # 🙂 — две единицы UTF-16: позиция после него — 2, а не 1.
-    text = "a🙂b\nвторая\n"
+    # 🙂 is two UTF-16 units: the position after it is 2, not 1.
+    text = "a🙂b\nsécond\n"
     change = {"range": {"start": {"line": 0, "character": 3}, "end": {"line": 1, "character": 6}}, "text": "X"}
     assert proxy.apply_changes(text, [change]) == "a🙂X\n"
 
@@ -101,7 +101,7 @@ def test_interpreter_for_worktree_uses_main_venv(tmp_path: Path) -> None:
     main, wt = _repo_with_worktree(tmp_path)
     python = _fake_executable(main / ".venv" / "bin" / "python")
     assert proxy.interpreter_for(wt, {}) == str(python)
-    # У самого проекта есть .venv или окружение активно — pyrefly найдёт сам, ничего не подменяем.
+    # The project itself has a .venv or an active environment: pyrefly finds it, nothing to override.
     assert proxy.interpreter_for(main, {}) is None
     assert proxy.interpreter_for(wt, {"VIRTUAL_ENV": "/somewhere"}) is None
     _fake_executable(wt / ".venv" / "bin" / "python")
@@ -145,7 +145,7 @@ def test_init_options_merge() -> None:
 def _touch(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
-    # Отметка времени файловой системы может быть грубой: сдвигаем вручную, чтобы изменение было видно.
+    # File system timestamps can be coarse: shift them by hand so the change is visible.
     t = time.time() + 5
     os.utime(path, (t, t))
 
@@ -162,7 +162,7 @@ def test_disk_watcher_in_git_repo(tmp_path: Path) -> None:
     _touch(root / "pkg" / "new.py", "n = 1\n")
     (root / "pkg" / "b.py").unlink()
     _touch(root / "ignored" / "c.py", "c = 2\n")
-    _touch(root / "notes.txt", "не код\n")
+    _touch(root / "notes.txt", "not code\n")
     changes = {(p.relative_to(root).as_posix(), kind) for p, kind in watcher.changes()}
     assert changes == {("a.py", 2), ("pkg/new.py", 1), ("pkg/b.py", 3)}
     assert watcher.changes() == []
@@ -241,7 +241,7 @@ def test_call_sites_of_decorated_function_and_unknown_line() -> None:
 
 
 def _at(name_line: str) -> tuple[int, int]:
-    """(строка, столбец имени) для строки SOURCE, которая начинается с name_line после отступа."""
+    """(line, column of the name) for the SOURCE line that starts with name_line after indentation."""
     for i, text in enumerate(SOURCE.split("\n")):
         if text.strip().startswith(name_line):
             word = name_line.split()[-1].split("(")[0]
@@ -263,7 +263,7 @@ def test_describe_target_function_method_and_constructor() -> None:
 
     ctor = proxy.describe_target(SOURCE, *_at("def __init__"))
     assert ctor is not None
-    # Конструктор остаётся методом: по его элементу иерархию можно обходить дальше.
+    # The constructor stays a method: the hierarchy can be walked further from its item.
     assert (ctor["name"], ctor["kind"]) == ("__init__", 6)
     cls = proxy.describe_target(SOURCE, *_at("class Box"))
     assert cls is not None
@@ -272,14 +272,14 @@ def test_describe_target_function_method_and_constructor() -> None:
     deco = proxy.describe_target(SOURCE, *_at("def decorated"))
     assert deco is not None
     assert deco["name"] == "decorated"
-    assert deco["range"]["start"]["line"] == _at("def decorated")[0] - 1  # с декоратором
+    assert deco["range"]["start"]["line"] == _at("def decorated")[0] - 1  # including the decorator
 
     assert proxy.describe_target(SOURCE, 0, 0) is None
 
 
 def test_describe_target_rejects_positions_off_the_name() -> None:
     text = "def make(cls, n):\n    return cls(n)\n"
-    # Определение вызываемого параметра указывает на строку def — это не сама функция make.
+    # The definition of a callable parameter points at the def line; it is not the function make itself.
     assert proxy.describe_target(text, 0, text.index("cls")) is None
     assert proxy.describe_target(text, 0, 0) is None
     item = proxy.describe_target(text, 0, 4)
@@ -311,7 +311,7 @@ def test_merge_outgoing_dedupes_by_target_and_range() -> None:
 
 
 def test_merge_outgoing_keeps_every_target_of_one_call_site() -> None:
-    # x: A | B — x.f() ведёт в оба метода; сервер нашёл один, достройка — оба.
+    # x: A | B: x.f() leads to both methods; the server found one, completion finds both.
     server = [_call("f", "file:///m.py", 10, 30)]
     ours = [_call("f", "file:///m.py", 10, 30), _call("f", "file:///m.py", 15, 30)]
     merged = proxy.merge_outgoing(server, ours)
@@ -339,14 +339,14 @@ def _call_to(name: str, kind: int, line: int, *ranges: dict) -> dict:
 
 
 def test_merge_outgoing_keeps_the_server_constructor_over_our_class() -> None:
-    # Box(1): сервер — __init__ (по нему иерархию можно обходить дальше), достройка — класс Box.
+    # Box(1): the server gives __init__ (the hierarchy can be walked further from it), completion gives class Box.
     server = [_call_to("__init__", 6, 1, _rng(20, 11, 17))]
     ours = [_call_to("Box", 5, 0, _rng(20, 11, 14))]
     assert [c["to"]["name"] for c in proxy.merge_outgoing(server, ours)] == ["__init__"]
 
 
 def test_merge_outgoing_keeps_a_nested_call_inside_the_server_range() -> None:
-    # helper(helper()): сервер даёт диапазон всего внешнего вызова, достройка — оба имени.
+    # helper(helper()): the server gives the range of the whole outer call, completion gives both names.
     server = [_call_to("helper", 12, 5, _rng(20, 11, 27))]
     ours = [_call_to("helper", 12, 5, _rng(20, 11, 17), _rng(20, 18, 24))]
     merged = proxy.merge_outgoing(server, ours)
@@ -357,7 +357,7 @@ def test_merge_outgoing_keeps_a_nested_call_inside_the_server_range() -> None:
 def test_unopened_changes_compare_paths_not_uri_strings(tmp_path: Path) -> None:
     opened = tmp_path / "my+proj" / "a.py"
     other = tmp_path / "my+proj" / "b.py"
-    node_style_uri = "file://" + str(opened)  # Node не кодирует «+», Python кодирует
+    node_style_uri = "file://" + str(opened)  # Node does not encode "+", Python does
     assert node_style_uri != opened.as_uri()
     changes = proxy.unopened_changes([(opened, 2), (other, 1)], [node_style_uri])
     assert [c["type"] for c in changes] == [1]
@@ -445,11 +445,11 @@ def test_disk_watcher_outside_git_switches_off_on_a_large_tree(tmp_path: Path) -
     assert small.enabled is True
 
 
-# --- прослойка с подставным сервером ------------------------------------------------------
+# --- proxy with a fake server -------------------------------------------------------------
 
 
 class _Recorder(io.RawIOBase):
-    """stdin подставного сервера: собирает отправленные сообщения."""
+    """The fake server's stdin: collects the messages sent to it."""
 
     def __init__(self) -> None:
         self.buffer = b""
@@ -525,9 +525,9 @@ def test_incremental_change_after_resync_takes_the_text_from_disk(tmp_path: Path
     path.write_text("a = 1\n")
     p, server = _proxy(tmp_path)
     uri = _open(p, path, "a = 1\n")
-    _touch(path, "a = 1\nb = 2\n")  # мимо Claude
+    _touch(path, "a = 1\nb = 2\n")  # outside Claude
     p.sync()
-    # Claude правит свой (старый) буфер фрагментом и записывает итог на диск.
+    # Claude edits its own (old) buffer with a fragment and writes the result to disk.
     _touch(path, "z = 0\na = 1\n")
     change = {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "text": "z = 0\n"}
     p.from_client(
@@ -549,7 +549,7 @@ def test_unreadable_file_is_retried_on_the_next_sync(tmp_path: Path) -> None:
     p, server = _proxy(tmp_path)
     _open(p, path, "a = 1\n")
     _touch(path, "a = 2\n")
-    path.chmod(0)  # временно недоступен; права вернут, а содержимое и mtime не изменятся
+    path.chmod(0)  # temporarily unreadable; permissions come back, content and mtime stay the same
     try:
         p.sync()
     finally:
@@ -567,7 +567,7 @@ def test_sync_failure_on_request_path_does_not_escape(tmp_path: Path) -> None:
     p, server = _proxy(tmp_path)
 
     def boom() -> list:
-        raise ValueError("сбой сверки")
+        raise ValueError("sync failure")
 
     p.watcher.changes = boom  # type: ignore[method-assign, union-attr]
     p.from_client({"jsonrpc": "2.0", "id": 7, "method": "textDocument/hover", "params": {}})
@@ -606,7 +606,7 @@ def test_definition_index_is_cached_and_bounded(tmp_path: Path, monkeypatch: pyt
 
 
 def test_did_open_with_text_differing_from_disk_is_resynced(tmp_path: Path) -> None:
-    # Claude записал `x=2`, форматтер успел переписать файл — у клиента текст старше диска.
+    # Claude wrote `x=2`, then a formatter rewrote the file: the client's text is older than the disk.
     path = tmp_path / "f.py"
     path.write_text("x = 2\n")
     p, server = _proxy(tmp_path)
@@ -625,7 +625,7 @@ def test_did_change_with_text_differing_from_disk_is_resynced(tmp_path: Path) ->
     path.write_text("x = 1\n")
     p, server = _proxy(tmp_path)
     uri = _open(p, path, "x = 1\n")
-    _touch(path, "x = 2\n")  # форматтер после записи Claude
+    _touch(path, "x = 2\n")  # the formatter after Claude's write
     change = {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": "x=2\n"}]}
     p.from_client({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": change})
     p.sync()
@@ -658,7 +658,7 @@ def test_unreadable_disk_with_incremental_change_does_not_corrupt_the_document(t
     p, server = _proxy(tmp_path)
     uri = _open(p, path, "a = 1\n")
     _touch(path, "a = 1\nb = 2\n")
-    p.sync()  # подставлен текст с диска
+    p.sync()  # the disk text is substituted
     before = len(server.stdin.messages())
     path.chmod(0)
     try:
@@ -673,7 +673,7 @@ def test_unreadable_disk_with_incremental_change_does_not_corrupt_the_document(t
                 "params": {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [change]},
             }
         )
-        assert len(server.stdin.messages()) == before  # испорченный текст серверу не ушёл
+        assert len(server.stdin.messages()) == before  # the corrupted text did not reach the server
         assert p.docs[uri].text == "a = 1\nb = 2\n"
     finally:
         path.chmod(0o644)
@@ -689,7 +689,7 @@ def test_index_of_an_open_document_follows_its_version(tmp_path: Path) -> None:
     p, _server = _proxy(tmp_path)
     uri = _open(p, path, path.read_text())
     assert p.describe(uri, 0, 4)["name"] == "a"  # type: ignore[index]
-    # Буфер Claude ушёл вперёд, диск ещё прежний — индекс должен соответствовать буферу.
+    # Claude's buffer moved ahead while the disk is still old: the index must match the buffer.
     change = {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": "def b() -> None:\n    pass\n"}]}
     p.from_client({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": change})
     assert p.describe(uri, 0, 4)["name"] == "b"  # type: ignore[index]
@@ -701,7 +701,7 @@ def test_scan_runs_outside_the_document_lock_and_is_skipped_when_fresh(tmp_path:
 
     class _Watcher:
         enabled = True
-        cost = 0.5  # дорогой репозиторий
+        cost = 0.5  # a costly repository
         last_scan = time.monotonic()
 
         def changes(self) -> list:
@@ -710,9 +710,9 @@ def test_scan_runs_outside_the_document_lock_and_is_skipped_when_fresh(tmp_path:
 
     p.watcher = _Watcher()  # type: ignore[assignment]
     p.from_client({"jsonrpc": "2.0", "id": 1, "method": "textDocument/hover", "params": {}})
-    assert calls == []  # фон сканировал только что — на пути запроса не повторяем
+    assert calls == []  # the background just scanned: not repeated on the request path
     p.sync()
-    assert calls == [False]  # фоновый скан идёт без блокировки документов
+    assert calls == [False]  # the background scan runs without the document lock
 
 
 @NOT_ROOT
@@ -756,7 +756,7 @@ def test_poll_keeps_syncing_open_documents_when_the_watcher_fails(
     _open(p, path, "a = 1\n")
 
     def broken(*_a: object, **_k: object) -> None:
-        raise RuntimeError("слежение не поднялось")
+        raise RuntimeError("watching failed to start")
 
     monkeypatch.setattr(proxy, "DiskWatcher", broken)
     monkeypatch.setattr(proxy, "POLL_INTERVAL", 0.05)
@@ -787,7 +787,7 @@ def test_reopened_document_gets_a_fresh_index(tmp_path: Path) -> None:
 
 def test_files_with_a_bom_are_parsed() -> None:
     text = "\ufeffdef f() -> int:\n    return g()\n"
-    # BOM — первый символ документа: позиции первой строки сдвинуты на одну единицу UTF-16.
+    # The BOM is the document's first character: first-line positions shift by one UTF-16 unit.
     assert [(s.line, s.character) for s in proxy.call_sites(text, 0)] == [(1, 11)]
     item = proxy.describe_target(text, 0, 5)
     assert item is not None
@@ -808,7 +808,7 @@ def test_project_ignored_by_an_enclosing_repo_is_watched(tmp_path: Path) -> None
 
 
 def test_merge_outgoing_keeps_a_class_nested_in_a_constructor_call() -> None:
-    # Outer(Inner()): диапазон конструктора Outer накрывает и Inner() — отбросить надо только Outer.
+    # Outer(Inner()): Outer's constructor range also covers Inner(); only Outer must be dropped.
     server = [_call_to("__init__", 6, 1, _rng(20, 11, 27))]
     ours = [_call_to("Outer", 5, 0, _rng(20, 11, 16)), _call_to("Inner", 5, 3, _rng(20, 17, 22))]
     assert sorted(c["to"]["name"] for c in proxy.merge_outgoing(server, ours)) == ["Inner", "__init__"]
@@ -821,13 +821,13 @@ def test_request_after_a_background_send_waits_for_the_recheck(tmp_path: Path) -
     p, _server = _proxy(root)
     _open(p, opened, "x = 1\n")
     _touch(root / "b.py", "y = 1\n")
-    assert p.sync() is not None  # фон нашёл и отправил
+    assert p.sync() is not None  # the background found and sent it
     settled = []
     p.settle = settled.append  # type: ignore[method-assign]
     p.from_client({"jsonrpc": "2.0", "id": 3, "method": "textDocument/hover", "params": {}})
     assert len(settled) == 1
     p.from_client({"jsonrpc": "2.0", "id": 4, "method": "textDocument/hover", "params": {}})
-    assert len(settled) == 1  # второй запрос — уже без ожидания
+    assert len(settled) == 1  # the second request no longer waits
 
 
 def test_a_broken_document_does_not_lose_found_changes(tmp_path: Path) -> None:
@@ -874,7 +874,7 @@ def test_disabled_sync_does_not_read_the_disk_on_open_and_change(
     p.server = _FakeServer()  # type: ignore[assignment]
 
     def no_reads(*_a: object, **_k: object) -> None:
-        raise AssertionError("диск читать не нужно")
+        raise AssertionError("the disk must not be read")
 
     monkeypatch.setattr(proxy, "_read_text", no_reads)
     uri = _open(p, path, "x = 1\n")
@@ -911,10 +911,10 @@ def test_unparsable_file_is_logged_once(tmp_path: Path, capsys: pytest.CaptureFi
     }
     assert p.compute_outgoing(item) == []
     assert p.compute_outgoing(item) == []
-    assert capsys.readouterr().err.count("не разобрал") == 1
+    assert capsys.readouterr().err.count("could not parse") == 1
 
 
-@pytest.mark.skipif(not __import__("shutil").which("python3.9"), reason="нет python3.9")
+@pytest.mark.skipif(not __import__("shutil").which("python3.9"), reason="no python3.9")
 def test_proxy_module_imports_on_python39() -> None:
     import subprocess
 

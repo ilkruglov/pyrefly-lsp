@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Прослойка между Claude Code и `pyrefly lsp`.
+"""Proxy between Claude Code and `pyrefly lsp`.
 
-Claude Code объявляет серверу, что не следит за файлами (`didChangeWatchedFiles` нет), шлёт
-`didChange` только на собственные правки и не передаёт настроек. Отсюда то, что прослойка
-добавляет к голому серверу:
+Claude Code tells the server it does not watch files (no `didChangeWatchedFiles`), sends
+`didChange` only for its own edits and passes no settings. Hence what the proxy adds to the
+bare server:
 
-- запуск pyrefly из `.venv` проекта (или основной копии для git worktree), иначе из PATH,
-  с индексацией `lazy-blocking`: поиск ссылок полный с первого запроса;
-- синхронизация с диском: сервер узнаёт о файлах, изменённых мимо Claude (git, форматтер,
-  другой агент), а в открытые документы попадает текст с диска;
-- worktree без своего `.venv`: интерпретатор основной копии (`pythonPath`);
-- режим проверки для проектов без конфига pyrefly и отключение ошибок — из настроек плагина;
-- полные исходящие вызовы: pyrefly теряет вызовы внутри `await` и выражений
-  (facebook/pyrefly#5486), прослойка достраивает их по `ast` и переходу к определению.
+- runs pyrefly from the project's `.venv` (or the main checkout's for a git worktree), else from PATH,
+  with `lazy-blocking` indexing: find-references is complete from the first request;
+- disk sync: the server learns about files changed outside Claude (git, a formatter,
+  another agent), and open documents get the text from disk;
+- a worktree without its own `.venv` gets the main checkout's interpreter (`pythonPath`);
+- type-checking mode for projects without a pyrefly config and the diagnostics switch come from plugin settings;
+- complete outgoing calls: pyrefly loses calls inside `await` and expressions
+  (facebook/pyrefly#5486); the proxy adds them using `ast` and go-to-definition.
 
-Только стандартная библиотека, Python 3.9+. Протокол — в stdout, журнал — в stderr.
+Standard library only, Python 3.9+. Protocol on stdout, log on stderr.
 
-Блокировки: doc_lock упорядочивает всё, что меняет документы на сервере (open/change/close
-и сверку с диском), и под ним можно писать серверу. Поток ответов сервера doc_lock не берёт
-никогда — иначе запись в переполненный stdin сервера и непрочитанный stdout заперли бы друг друга.
+Locks: doc_lock orders everything that changes documents on the server (open/change/close
+and disk sync), and writing to the server is allowed under it. The server-reply thread never
+takes doc_lock: otherwise a write into the server's full stdin and its unread stdout would deadlock.
 """
 
 from __future__ import annotations
@@ -46,18 +46,18 @@ if TYPE_CHECKING:
 TYPE_CHECKING_MODES = ("auto", "off", "basic", "legacy", "default", "strict", "all")
 INDEXING_MODES = ("lazy-blocking", "lazy-non-blocking-background", "none")
 WATCHED_SUFFIXES = (".py", ".pyi")
-# Конфиги, которые pyrefly читает сам или переносит в режиме auto.
+# Configs that pyrefly reads itself or migrates in auto mode.
 WATCHED_NAMES = ("pyproject.toml", "pyrefly.toml", "mypy.ini", ".mypy.ini", "setup.cfg", "pyrightconfig.json")
 SKIP_DIRS = {"node_modules", "__pycache__", "build", "dist", "target", "site-packages"}
-# Вне git обход дерева раз в секунду дорог: на большом дереве слежение за неоткрытыми файлами выключается.
+# Outside git, walking the tree every second is costly: on a large tree, watching unopened files is off.
 MAX_WALK_ENTRIES = 20_000
 MAX_GIT_FILES = 50_000
-# Сверка с диском в фоне: сервер узнаёт о правке мимо Claude раньше, чем придёт запрос.
+# Background disk sync: the server learns about an edit made outside Claude before a request arrives.
 POLL_INTERVAL = 1.0
-# Скан дороже этого на пути запроса не повторяем, если фон сканировал меньше POLL_INTERVAL назад.
+# On the request path, a scan costlier than this is skipped if the background scanned < POLL_INTERVAL ago.
 CHEAP_SCAN = 0.05
-# Зависимые файлы pyrefly перепроверяет в фоне и после этого заново публикует ошибки открытых
-# файлов. Если правка найдена в момент запроса, ждём первую публикацию, затем тишину.
+# pyrefly rechecks dependent files in the background and then republishes diagnostics for open
+# files. If an edit is found at request time, wait for the first publication, then for quiet.
 FIRST_PUBLICATION_TIMEOUT = 1.5
 SETTLE_QUIET = 0.15
 SETTLE_TIMEOUT = 3.0
@@ -67,7 +67,7 @@ INDEX_CACHE_SIZE = 64
 FILE_CREATED, FILE_CHANGED, FILE_DELETED = 1, 2, 3
 PROXY_ID_PREFIX = "pyrefly-lsp-proxy-"
 KIND_CLASS, KIND_METHOD, KIND_FUNCTION = 5, 6, 12
-# Вызов класса pyrefly отдаёт как вызов его __init__/__new__ (__call__ — вызов экземпляра, не класса).
+# pyrefly reports a class call as a call to its __init__/__new__ (__call__ calls an instance, not the class).
 CONSTRUCTORS = ("__init__", "__new__")
 FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 DEF_NAME = re.compile(r"(?:async\s+def|def|class)\s+([^\W\d]\w*)")
@@ -78,14 +78,14 @@ def log(message: str) -> None:
     print(f"pyrefly-lsp: {message}", file=sys.stderr, flush=True)
 
 
-# --- протокол -----------------------------------------------------------------------------
+# --- protocol -----------------------------------------------------------------------------
 
 
 def encode(msg: Mapping[str, Any]) -> bytes:
     try:
         body = json.dumps(msg, ensure_ascii=False).encode()
     except UnicodeEncodeError:
-        # Одиночный суррогат в строке: в UTF-8 его не записать, а как \\u-escape — можно.
+        # A lone surrogate can't be written as UTF-8, but it can as a \\u escape.
         body = json.dumps(msg, ensure_ascii=True).encode()
     return b"Content-Length: %d\r\n\r\n" % len(body) + body
 
@@ -111,12 +111,12 @@ def read_message(stream: IO[bytes]) -> dict[str, Any] | None:
 
 
 def split_lines(text: str) -> list[str]:
-    r"""Строки так, как их считают LSP и ast: разделители только \n, \r\n и \r."""
+    r"""Lines the way LSP and ast count them: separators are only \n, \r\n and \r."""
     return LINE_BREAK.split(text)
 
 
 def _offset(text: str, line: int, character: int) -> int:
-    """Индекс в строке Python для позиции LSP (строка, столбец в единицах UTF-16)."""
+    """Python string index for an LSP position (line, column in UTF-16 units)."""
     starts = [0, *(m.end() for m in LINE_BREAK.finditer(text))]
     if line >= len(starts):
         return len(text)
@@ -147,7 +147,7 @@ def _utf16_len(s: str) -> int:
 
 
 def _utf16_col(line_text: str, byte_offset: int) -> int:
-    """Столбец UTF-16 по смещению в байтах UTF-8 (так считает `ast`)."""
+    """UTF-16 column for a UTF-8 byte offset (the way `ast` counts)."""
     return _utf16_len(line_text.encode()[:byte_offset].decode(errors="ignore"))
 
 
@@ -158,7 +158,7 @@ def uri_to_path(uri: str) -> Path | None:
     return Path(urllib.request.url2pathname(parsed.path))
 
 
-# --- настройки и окружение ----------------------------------------------------------------
+# --- settings and environment -------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -169,14 +169,14 @@ class Settings:
     complete_outgoing_calls: bool = True
     indexing_mode: str = "lazy-blocking"
     pyrefly: str | None = None
-    # Предел файлов проекта, которые индексирует pyrefly (у самого pyrefly по умолчанию 2000).
+    # Limit on project files pyrefly indexes (pyrefly's own default is 2000).
     indexing_limit: int | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> Settings:
         def raw(name: str) -> str:
             value = (env.get(name) or "").strip()
-            # Неподставленная ${user_config.X} — пользователь ничего не задал.
+            # An unsubstituted ${user_config.X} means the user set nothing.
             return "" if value.startswith("${") else value
 
         def flag(name: str, default: bool) -> bool:
@@ -187,23 +187,23 @@ class Settings:
                 return True
             if value in ("0", "false", "no", "off"):
                 return False
-            log(f"{name}={value!r} не понял, оставляю {default}")
+            log(f"{name}={value!r} not understood, keeping {default}")
             return default
 
         mode = raw("PYREFLY_LSP_TYPE_CHECKING_MODE") or "auto"
         if mode not in TYPE_CHECKING_MODES:
-            log(f"режим проверки {mode!r} неизвестен, беру auto")
+            log(f"unknown type-checking mode {mode!r}, using auto")
             mode = "auto"
         indexing = raw("PYREFLY_LSP_INDEXING_MODE") or "lazy-blocking"
         if indexing not in INDEXING_MODES:
-            log(f"режим индексации {indexing!r} неизвестен, беру lazy-blocking")
+            log(f"unknown indexing mode {indexing!r}, using lazy-blocking")
             indexing = "lazy-blocking"
         pyrefly = raw("PYREFLY_LSP_PYREFLY")
         limit_text = raw("PYREFLY_LSP_INDEXING_LIMIT")
         try:
-            limit = int(float(limit_text)) if limit_text else 0  # число из настроек может прийти как «10000.0»
+            limit = int(float(limit_text)) if limit_text else 0  # a number from settings may arrive as "10000.0"
         except ValueError:
-            log(f"предел индексации {limit_text!r} не понял, оставляю предел pyrefly")
+            log(f"indexing limit {limit_text!r} not understood, keeping the pyrefly default")
             limit = 0
         return cls(
             type_checking_mode=mode,
@@ -231,7 +231,7 @@ def _git_lines(root: Path, *args: str) -> list[str] | None:
 
 
 def main_checkout(root: Path) -> Path | None:
-    """Основная копия репозитория, если root — дополнительный git worktree."""
+    """The repository's main checkout if root is an additional git worktree."""
     lines = _git_lines(root, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir")
     if not lines or len(lines) < 2:
         return None
@@ -243,7 +243,7 @@ def main_checkout(root: Path) -> Path | None:
 
 @dataclass(frozen=True)
 class VenvSearch:
-    """Где искать .venv: сам проект и корень его worktree, затем основная копия (тот же подкаталог, корень)."""
+    """Where to look for .venv: the project and its worktree root, then the main checkout (same subdir, root)."""
 
     own: tuple[Path, ...]
     main: tuple[Path, ...]
@@ -273,7 +273,7 @@ def venv_search(root: Path) -> VenvSearch:
 def _exists(path: Path) -> bool:
     try:
         return path.exists()
-    except OSError:  # нет прав зайти в каталог — считаем, что файла нет
+    except OSError:  # no permission to enter the directory: treat the file as missing
         return False
 
 
@@ -286,7 +286,7 @@ def _venv_file(base: Path, *names: str) -> Path | None:
 
 
 def interpreter_for(root: Path, env: Mapping[str, str], search: VenvSearch | None = None) -> str | None:
-    """pythonPath, если у самого проекта нет .venv: корень worktree, затем основная копия."""
+    """pythonPath if the project itself has no .venv: the worktree root, then the main checkout."""
     if env.get("VIRTUAL_ENV") or _venv_file(root, "bin/python", "Scripts/python.exe"):
         return None
     search = search or venv_search(root)
@@ -331,7 +331,7 @@ def init_options(client: Mapping[str, Any] | None, settings: Settings, python_pa
     return options
 
 
-# --- слежение за диском -------------------------------------------------------------------
+# --- disk watching ------------------------------------------------------------------------
 
 
 class _TooLarge(Exception):
@@ -343,12 +343,12 @@ class _GitFailed(Exception):
 
 
 class DiskWatcher:
-    """Снимок (mtime, размер) файлов Python и конфигов проекта; changes() — что изменилось с прошлого раза.
+    """Snapshot (mtime, size) of the project's Python files and configs; changes() returns what changed since.
 
-    В git список даёт `git ls-files` (миллисекунды). Вне git — обход каталогов без виртуальных
-    окружений; если в дереве больше max_entries записей, слежение выключается целиком: усечённый
-    обход давал бы ложные «удаления» и грузил бы диск каждую секунду. Сбой git не переводит в обход —
-    тот видит игнорируемые файлы; снимок просто остаётся прежним до следующего удачного прохода.
+    In git the list comes from `git ls-files` (milliseconds). Outside git it is a directory walk that skips
+    virtual environments; if the tree has more than max_entries entries, watching is switched off entirely: a
+    truncated walk would report false "deletions" and load the disk every second. A git failure does not
+    switch to walking (a walk sees ignored files); the snapshot just stays as is until the next good pass.
     """
 
     def __init__(self, root: Path, max_entries: int = MAX_WALK_ENTRIES) -> None:
@@ -357,8 +357,8 @@ class DiskWatcher:
         inside = _git(root, "rev-parse", "--is-inside-work-tree")
         self.use_git = inside is not None and inside.returncode == 0 and inside.stdout.strip() == b"true"
         if self.use_git:
-            # Проект лежит в игнорируемом каталоге другого репозитория (dotfiles в ~, .tmp/):
-            # ls-files его не покажет — следим обходом каталогов.
+            # The project sits in an ignored directory of another repository (dotfiles in ~, .tmp/):
+            # ls-files won't show it, so watch it by walking directories.
             ignored = _git(root, "check-ignore", "-q", ".")
             self.use_git = not (ignored is not None and ignored.returncode == 0)
         self.enabled = True
@@ -371,17 +371,15 @@ class DiskWatcher:
         except _TooLarge:
             self._switch_off()
         except _GitFailed:
-            self.snapshot = None  # базу снимем при первом удачном проходе
+            self.snapshot = None  # take the baseline on the first successful pass
 
     def _switch_off(self) -> None:
         self.enabled = False
         self.snapshot = {}
         if self.use_git:
-            log(
-                f"в {self.root} больше {MAX_GIT_FILES} файлов Python под git: слежение за неоткрытыми файлами выключено"
-            )
+            log(f"{self.root} has over {MAX_GIT_FILES} Python and config files in git: watching unopened files is off")
         else:
-            log(f"в {self.root} больше {self.max_entries} записей вне git: слежение за неоткрытыми файлами выключено")
+            log(f"{self.root} has over {self.max_entries} entries outside git: watching unopened files is off")
 
     def _list(self) -> list[Path]:
         if not self.use_git:
@@ -444,13 +442,13 @@ class DiskWatcher:
 
 
 def unopened_changes(changes: Iterable[tuple[Path, int]], open_uris: Iterable[str]) -> list[dict[str, Any]]:
-    """Изменения для didChangeWatchedFiles без открытых документов. Сравниваются пути: Node и
-    Python по-разному кодируют в URI символы вроде «+» и «@»."""
+    """Changes for didChangeWatchedFiles, excluding open documents. Paths are compared, not URIs: Node and
+    Python encode characters like "+" and "@" in URIs differently."""
     opened = {uri_to_path(uri) for uri in open_uris}
     return [{"uri": path.as_uri(), "type": kind} for path, kind in changes if path not in opened]
 
 
-# --- исходящие вызовы ---------------------------------------------------------------------
+# --- outgoing calls -----------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -479,7 +477,7 @@ def _function_at(tree: ast.AST, line: int) -> FunctionNode | None:
 
 
 def _calls(node: ast.AST) -> Iterator[ast.Call]:
-    """Вызовы, которые выполняются вместе с телом: тела вложенных функций и лямбд не в счёт."""
+    """Calls that run together with the body: bodies of nested functions and lambdas do not count."""
     if isinstance(node, ast.Call):
         yield node
     if isinstance(node, (*FUNCTION_NODES, ast.Lambda)):
@@ -494,8 +492,8 @@ def _calls(node: ast.AST) -> Iterator[ast.Call]:
 
 @dataclass(frozen=True)
 class Parsed:
-    """Разобранный текст. BOM `ast` не принимает: разбираем без него, а столбцы первой строки
-    сдвигаем на shift — в документе Claude Code BOM остаётся первым символом."""
+    """Parsed text. `ast` rejects a BOM: parse without it and shift first-line columns by shift,
+    because in a Claude Code document the BOM stays the first character."""
 
     tree: ast.Module
     lines: list[str]
@@ -516,7 +514,7 @@ def parse_source(text: str) -> Parsed | None:
 
 
 def call_sites(text: str, line: int, parsed: Parsed | None = None) -> list[CallSite]:
-    """Места вызовов внутри функции, имя которой стоит на строке line (0-based)."""
+    """Call sites inside the function whose name is on line `line` (0-based)."""
     parsed = parsed or parse_source(text)
     if parsed is None:
         return []
@@ -556,7 +554,7 @@ def _name_range(parsed: Parsed, node: FunctionNode | ast.ClassDef) -> dict[str, 
 
 
 class DefinitionIndex:
-    """Определения функций и классов файла по позиции их имени: файл разбирается один раз."""
+    """A file's function and class definitions by the position of their name; the file is parsed once."""
 
     def __init__(self, text: str) -> None:
         self.by_line: dict[int, list[tuple[int, int, dict[str, Any]]]] = {}
@@ -584,7 +582,7 @@ class DefinitionIndex:
         self.by_line.setdefault(name["start"]["line"], []).append((start, end, item))
 
     def describe(self, line: int, character: int) -> dict[str, Any] | None:
-        """CallHierarchyItem (без uri), только если позиция стоит на имени def или class."""
+        """CallHierarchyItem (without uri), only if the position is on the name of a def or class."""
         for start, end, item in self.by_line.get(line, []):
             if start <= character <= end:
                 return item
@@ -612,13 +610,13 @@ def _key(call: Mapping[str, Any]) -> tuple[str, int]:
 
 
 def merge_outgoing(server: list[dict[str, Any]] | None, ours: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Ответ сервера плюс вызовы, которых он не нашёл.
+    """The server's reply plus the calls it did not find.
 
-    - Одна цель — одна запись (ключ: uri и строка имени цели).
-    - Диапазон сервера может накрывать весь внешний вызов `helper(helper())`: ему соответствует
-      самое раннее из наших мест внутри него, остальные — отдельные вызовы.
-    - Вызов класса сервер отдаёт как __init__/__new__; наш вариант того же места — класс — отбрасываем,
-      чтобы по элементу метода иерархию можно было обходить дальше.
+    - One target, one entry (key: uri and the line of the target's name).
+    - A server range may cover the whole outer call `helper(helper())`: it matches the earliest
+      of our sites inside it; the others are separate calls.
+    - The server reports a class call as __init__/__new__; our entry for the same site (the class) is
+      dropped, so the call hierarchy can be walked further from the method item.
     """
     server = server or []
     constructor_ranges = [r for c in server if c["to"].get("name") in CONSTRUCTORS for r in c.get("fromRanges", [])]
@@ -629,7 +627,7 @@ def merge_outgoing(server: list[dict[str, Any]] | None, ours: list[dict[str, Any
         for j, rng in enumerate(call.get("fromRanges", []))
     ]
     dropped: set[tuple[int, int]] = set()
-    for known in constructor_ranges:  # Outer(Inner()): конструктору Outer соответствует только Outer
+    for known in constructor_ranges:  # Outer(Inner()): Outer's constructor matches only Outer
         candidates = [(i, j, r) for i, j, r in class_sites if (i, j) not in dropped and _overlaps(r, known)]
         if candidates:
             i, j, _r = min(candidates, key=lambda c: _start(c[2]))
@@ -659,7 +657,7 @@ def merge_outgoing(server: list[dict[str, Any]] | None, ours: list[dict[str, Any
     return list(merged.values())
 
 
-# --- прослойка ----------------------------------------------------------------------------
+# --- proxy --------------------------------------------------------------------------------
 
 
 @dataclass
@@ -668,9 +666,9 @@ class Doc:
     version: int
     disk: tuple[int, int] | None = None
     on_server: bool = True
-    # Текст подставлен с диска: инкрементная правка клиента считалась от его старого буфера.
+    # Text was taken from disk: the client's incremental edit was computed from its old buffer.
     resynced: bool = False
-    # Номер открытия: после didClose и нового didOpen версия снова начинается с 1.
+    # Open count: after didClose and a new didOpen the version starts at 1 again.
     generation: int = 0
 
 
@@ -685,14 +683,14 @@ def _disk_signature(path: Path | None) -> tuple[int, int] | None:
         return None
     try:
         st = path.stat()
-    except (OSError, ValueError):  # ValueError — нулевой байт в пути
+    except (OSError, ValueError):  # ValueError: a null byte in the path
         return None
     return st.st_mtime_ns, st.st_size
 
 
 def _read_text(path: Path | None, lenient: bool = False) -> str | None:
-    """Текст файла. Строго UTF-8 — для сверки документов (иначе None, попробуем позже);
-    lenient — с заменой битых байтов, для разбора определений."""
+    """File text. Strict UTF-8 for syncing documents (otherwise None, retry later);
+    lenient replaces bad bytes, for parsing definitions."""
     if path is None:
         return None
     try:
@@ -732,12 +730,12 @@ class Proxy:
         self.generations = 0
         self.exit_code: int | None = None
         self.stopped = threading.Event()
-        # Сверки (фон и запрос) идут по одной: скан и отправка его итогов — одно целое.
+        # Syncs (background and request) run one at a time: a scan and sending its results are one unit.
         self.sync_lock = threading.Lock()
-        # Фон отправил изменения, а их перепроверку ещё никто не дождался: ждёт ближайший запрос.
+        # The background sent changes and nobody has waited for their recheck yet: the next request waits.
         self.unsettled: int | None = None
 
-    # ввод-вывод
+    # I/O
     def to_client(self, msg: Mapping[str, Any]) -> None:
         with self.out_lock:
             self.client_out.write(encode(msg))
@@ -752,7 +750,7 @@ class Proxy:
             try:
                 server.stdin.write(data)
                 server.stdin.flush()
-            except (OSError, ValueError):  # сервер завершился или канал закрыт
+            except (OSError, ValueError):  # the server exited or the pipe is closed
                 pass
 
     def notify_server(self, method: str, params: Mapping[str, Any]) -> None:
@@ -774,7 +772,7 @@ class Proxy:
             self.pending.pop(rid, None)
         return None
 
-    # главный цикл
+    # main loop
     def run(self) -> int:
         while self.exit_code is None:
             msg = read_message(self.client_in)
@@ -804,7 +802,7 @@ class Proxy:
             return
         if self.server is None:
             if "id" in msg and method:
-                error = {"code": -32002, "message": "сервер ещё не инициализирован"}
+                error = {"code": -32002, "message": "server not initialized yet"}
                 self.to_client({"jsonrpc": "2.0", "id": msg["id"], "error": error})
             return
         if method == "textDocument/didOpen":
@@ -832,12 +830,12 @@ class Proxy:
         root = _root_from(params, self.env)
         search = venv_search(root)
         command = pyrefly_command(root, self.settings, search=search)
-        problem = "pyrefly не найден: поставьте его (uv tool install pyrefly) или задайте путь в настройках плагина"
+        problem = "pyrefly not found: install it (uv tool install pyrefly) or set its path in the plugin settings"
         if command is not None:
             try:
                 self.server = subprocess.Popen(command, cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
             except OSError as exc:
-                problem = f"не удалось запустить pyrefly ({command[0]}): {exc}"
+                problem = f"could not start pyrefly ({command[0]}): {exc}"
         if self.server is None or command is None:
             log(problem)
             self.to_client({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32603, "message": problem}})
@@ -845,20 +843,20 @@ class Proxy:
             return
         python_path = interpreter_for(root, self.env, search=search)
         if python_path:
-            log(f"у проекта нет своего .venv, беру интерпретатор {python_path}")
+            log(f"the project has no .venv of its own, using interpreter {python_path}")
         params["initializationOptions"] = init_options(params.get("initializationOptions"), self.settings, python_path)
         threading.Thread(target=self.from_server, daemon=True).start()
         self.to_server({**msg, "params": params})
         if self.settings.sync_from_disk:
-            # Первый снимок вне git может занять секунды — строим его в фоне, не задерживая initialize.
+            # Outside git the first snapshot can take seconds: build it in the background, don't delay initialize.
             threading.Thread(target=self.poll_disk, args=(root,), daemon=True).start()
-        log(f"запущен {' '.join(command)} в {root}")
+        log(f"started {' '.join(command)} in {root}")
 
-    # документы
+    # documents
     def _disk_matches(self, path: Path | None, text: str) -> tuple[int, int] | None:
-        """Подпись файла, если на диске ровно этот текст; иначе None — следующая сверка подставит диск."""
+        """File signature if exactly this text is on disk; otherwise None, and the next sync takes the disk text."""
         if not self.settings.sync_from_disk:
-            return None  # сверка выключена — диск не читаем
+            return None  # sync is off: don't read the disk
         sig = _disk_signature(path)
         return sig if sig is not None and _read_text(path) == text else None
 
@@ -883,11 +881,11 @@ class Proxy:
             path = uri_to_path(uri)
             incremental = any(c.get("range") is not None for c in changes)
             if doc.resynced and incremental:
-                # Claude Code сначала пишет файл, потом шлёт правку от своего старого буфера, а у нас
-                # уже текст с диска: правку поверх него не применить — берём итог с диска.
+                # Claude Code writes the file first, then sends an edit computed from its old buffer, while we
+                # already have the disk text: the edit can't be applied on top of it, so take the disk result.
                 disk_text = _read_text(path)
                 if disk_text is None:
-                    doc.disk = None  # прочитать нельзя: серверу ничего, следующая сверка подставит диск
+                    doc.disk = None  # unreadable: nothing for the server, the next sync takes the disk text
                     return
                 doc.text = disk_text
                 changes = [{"text": disk_text}]
@@ -910,28 +908,28 @@ class Proxy:
             if doc is None or doc.on_server:
                 self.to_server(msg)
 
-    # сверка с диском
+    # disk sync
     def poll_disk(self, root: Path) -> None:
         try:
             self.watcher = DiskWatcher(root)
-        except Exception as exc:  # noqa: BLE001 — без слежения за неоткрытыми файлами открытые всё равно сверяем
-            log(f"слежение за файлами не поднялось: {exc!r}")
+        except Exception as exc:  # noqa: BLE001 — without watching unopened files, open ones are still synced
+            log(f"file watching failed to start: {exc!r}")
         while not self.stopped.wait(max(POLL_INTERVAL, 10 * (self.watcher.cost if self.watcher else 0.0))):
             self.sync()
 
     def sync(self, from_request: bool = False) -> int | None:
-        """Сверить с диском. Если серверу что-то отправлено — число публикаций до отправки, иначе None.
+        """Sync with disk. If something was sent to the server, return the publication count before sending; else None.
 
-        Скан файлов идёт вне doc_lock. На пути запроса дорогой скан не повторяем, если фон только что
-        его сделал: правку, найденную фоном, сервер уже получил.
+        The file scan runs outside doc_lock. On the request path the costly scan is skipped if the background has
+        just done it: the server already got the edit the background found.
         """
         if not self.settings.sync_from_disk:
             return None
         with self.sync_lock:
             try:
                 return self._sync(from_request)
-            except Exception as exc:  # noqa: BLE001 — сверка не должна ронять прослойку ни в фоне, ни на запросе
-                log(f"сверка с диском не удалась: {exc!r}")
+            except Exception as exc:  # noqa: BLE001 — sync must not crash the proxy in the background or on a request
+                log(f"disk sync failed: {exc!r}")
                 return None
 
     def _sync(self, from_request: bool) -> int | None:
@@ -957,8 +955,8 @@ class Proxy:
         return seen
 
     def _sync_documents(self) -> bool:
-        """Открытые документы — к тексту на диске. Удалённый закрываем на сервере: тогда событие
-        об удалении его файла дойдёт до сервера вместе с остальными (см. unopened_changes)."""
+        """Bring open documents to the disk text. A deleted one is closed on the server, so the deletion event
+        for its file reaches the server along with the others (see unopened_changes)."""
         sent = False
         for uri, doc in self.docs.items():
             sent = self._sync_document_safely(uri, doc) or sent
@@ -967,12 +965,12 @@ class Proxy:
     def _sync_document_safely(self, uri: str, doc: Doc) -> bool:
         try:
             return self._sync_document(uri, doc)
-        except Exception as exc:  # noqa: BLE001 — один странный документ не должен сорвать сверку остальных
-            log(f"не сверил {uri}: {exc!r}")
+        except Exception as exc:  # noqa: BLE001 — one odd document must not break syncing the others
+            log(f"could not sync {uri}: {exc!r}")
             return False
 
     def _sync_document(self, uri: str, doc: Doc) -> bool:
-        """Один открытый документ — к тексту на диске. True, если серверу что-то отправлено."""
+        """Bring one open document to the disk text. True if something was sent to the server."""
         path = uri_to_path(uri)
         sig = _disk_signature(path)
         if sig is not None and sig == doc.disk and doc.on_server:
@@ -986,7 +984,7 @@ class Proxy:
             return True
         text = _read_text(path)
         if text is None:
-            return False  # прочитать не вышло — подпись не запоминаем, попробуем на следующем проходе
+            return False  # could not read: don't remember the signature, retry on the next pass
         doc.disk = sig
         if doc.on_server and text == doc.text:
             return False
@@ -1003,10 +1001,10 @@ class Proxy:
         return True
 
     def settle(self, seen: int) -> None:
-        """Дождаться, пока сервер перепроверит изменения: первая публикация ошибок после seen, затем тишина."""
+        """Wait until the server rechecks the changes: the first diagnostics publication after seen, then quiet."""
         with self.doc_lock:
             if not any(doc.on_server for doc in self.docs.values()):
-                return  # публиковать ошибки серверу не для чего — ждать нечего
+                return  # no documents on the server, so no diagnostics will be published: nothing to wait for
         deadline = time.monotonic() + SETTLE_TIMEOUT
         with self.published:
             if not self.published.wait_for(lambda: self.publications > seen, timeout=FIRST_PUBLICATION_TIMEOUT):
@@ -1016,7 +1014,7 @@ class Proxy:
                 if not self.published.wait_for(lambda last=last: self.publications > last, timeout=SETTLE_QUIET):
                     return
 
-    # ответы сервера
+    # server replies
     def from_server(self) -> None:
         server = self.server
         assert server is not None
@@ -1027,8 +1025,8 @@ class Proxy:
                 if msg is None:
                     break
                 self._handle_server_message(msg)
-        except Exception as exc:  # noqa: BLE001 — без этого поток молча умрёт, а Claude будет ждать ответов вечно
-            log(f"поток ответов pyrefly упал: {exc!r}")
+        except Exception as exc:  # noqa: BLE001 — otherwise the thread dies silently and Claude waits forever
+            log(f"pyrefly reply thread crashed: {exc!r}")
             if not self.stopped.is_set():
                 self.stop_server()
                 os._exit(1)
@@ -1036,9 +1034,9 @@ class Proxy:
         with self.out_lock:
             self.client_out.flush()
         if self.stopped.is_set():
-            os._exit(0)  # сервер остановили мы: сессия закончилась штатно
+            os._exit(0)  # we stopped the server: the session ended normally
         if code:
-            log(f"pyrefly завершился с кодом {code}")
+            log(f"pyrefly exited with code {code}")
         os._exit(code if code and code > 0 else (1 if code else 0))
 
     def _handle_server_message(self, msg: dict[str, Any]) -> None:
@@ -1058,12 +1056,12 @@ class Proxy:
                 return
         self.to_client(msg)
 
-    # исходящие вызовы
+    # outgoing calls
     def outgoing_calls(self, msg: dict[str, Any]) -> None:
         rid, waiter = self.ask_server(msg["method"], msg.get("params") or {})
         reply = self.wait_reply(rid, waiter, OUTGOING_TIMEOUT)
         if reply is None:
-            reply = {"error": {"code": -32603, "message": "pyrefly не ответил на outgoingCalls"}}
+            reply = {"error": {"code": -32603, "message": "pyrefly did not answer outgoingCalls"}}
         if "error" in reply:
             self.to_client({"jsonrpc": "2.0", "id": msg["id"], "error": reply["error"]})
             return
@@ -1071,13 +1069,13 @@ class Proxy:
         try:
             ours = self.compute_outgoing((msg.get("params") or {}).get("item") or {})
             result = merge_outgoing(result if isinstance(result, list) else [], ours)
-        except Exception as exc:  # noqa: BLE001 — достройка необязательна: при сбое отдаём ответ сервера как есть
-            log(f"не смог достроить исходящие вызовы: {exc!r}")
+        except Exception as exc:  # noqa: BLE001 — completion is optional: on failure return the server's reply
+            log(f"could not complete outgoing calls: {exc!r}")
         self.to_client({"jsonrpc": "2.0", "id": msg["id"], "result": result})
 
     def _version(self, uri: str) -> tuple[Any, str | None]:
-        """Версия текста без чтения файла: документ — по номеру открытия и версии, файл — по подписи.
-        Второе значение — текст открытого документа (у файла читаем только при промахе кэша)."""
+        """Text version without reading the file: a document by open count and version, a file by signature.
+        The second value is the open document's text (a file is read only on a cache miss)."""
         with self.doc_lock:
             doc = self.docs.get(uri)
             if doc is not None:
@@ -1122,12 +1120,12 @@ class Proxy:
                 self.unparsable.add(uri)
                 try:
                     ast.parse(text.lstrip("\ufeff"))
-                    reason = "не разбирается"
+                    reason = "does not parse"
                 except (SyntaxError, ValueError) as exc:
-                    reason = f"{getattr(exc, 'msg', exc)}, строка {getattr(exc, 'lineno', '?')}"
+                    reason = f"{getattr(exc, 'msg', exc)}, line {getattr(exc, 'lineno', '?')}"
                 log(
-                    f"не разобрал {uri} на Python {sys.version.split()[0]} ({reason}): исходящие вызовы для него — "
-                    "только ответ pyrefly. Если это новый синтаксис, прослойке нужен python3 не старше проекта"
+                    f"could not parse {uri} with Python {sys.version.split()[0]} ({reason}): outgoing calls for it are "
+                    "pyrefly's reply only. New syntax needs a python3 at least as new as the project"
                 )
             return []
         asked = []
@@ -1145,7 +1143,7 @@ class Proxy:
                 continue
             result = reply.get("result")
             targets = result if isinstance(result, list) else [result] if isinstance(result, dict) else []
-            for target in targets:  # у x: A | B определений несколько — каждое своя цель
+            for target in targets:  # x: A | B has several definitions, each is its own target
                 target_uri = target.get("targetUri") or target.get("uri")
                 target_range = target.get("targetSelectionRange") or target.get("range")
                 if not target_uri or not target_range:
@@ -1153,16 +1151,16 @@ class Proxy:
                 start = target_range["start"]
                 described = self.describe(target_uri, start["line"], start["character"])
                 if described is None:
-                    continue  # параметр, переменная, импорт — не определение функции или класса
+                    continue  # a parameter, variable or import, not a function or class definition
                 calls.append({"to": {"uri": target_uri, **described}, "fromRanges": [site.as_range()]})
         if missed:
-            log(f"pyrefly не успел найти определения для {missed} вызовов из {len(asked)}")
+            log(f"pyrefly did not find definitions in time for {missed} of {len(asked)} calls")
         return calls
 
 
 def main() -> int:
-    if sys.version_info < (3, 9):  # noqa: UP036 — понятное сообщение вместо падения на старом python3
-        log(f"нужен Python 3.9 или новее, запущен {sys.version.split()[0]} ({sys.executable})")
+    if sys.version_info < (3, 9):  # noqa: UP036 — a clear message instead of a crash on an old python3
+        log(f"Python 3.9 or newer is required, running {sys.version.split()[0]} ({sys.executable})")
         return 1
     settings = Settings.from_env(os.environ)
     return Proxy(settings, os.environ, sys.stdin.buffer, sys.stdout.buffer).run()

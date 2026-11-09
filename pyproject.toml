@@ -1,4 +1,4 @@
-# Только инструменты разработки плагина: сам плагин — скрипт без зависимостей.
+# Development tooling only: the plugin itself is a script with no dependencies.
 
 [tool.ruff]
 line-length = 120
@@ -6,8 +6,10 @@ target-version = "py39"
 
 [tool.ruff.lint]
 extend-select = ["E4", "E7", "B", "UP", "SIM", "RUF", "C4", "PT", "RET", "PERF", "PLE", "PLW"]
-# Русский текст: кириллица в строках, docstring и комментариях — не путаница символов.
-ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# "×" in call labels such as "helper×2" is intentional.
+"tests/test_proxy_e2e.py" = ["RUF001"]
 
 [tool.ruff.format]
 exclude = ["**/*.md"]
@@ -16,7 +18,7 @@ exclude = ["**/*.md"]
 project-includes = ["plugins/pyrefly-lsp/scripts", "tests"]
 search-path = ["plugins/pyrefly-lsp/scripts", "tests"]
 python-version = "3.9"
-# Тесты идут через `uvx pytest`: своего окружения с pytest у репозитория нет.
+# Tests run with `uvx pytest`: the repository has no environment of its own with pytest.
 ignore-missing-imports = ["pytest"]
 
 [tool.pytest.ini_options]
