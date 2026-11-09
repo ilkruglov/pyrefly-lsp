@@ -52,7 +52,7 @@
     "pyrefly_path": {
       "type": "string",
       "title": "Path to pyrefly",
-      "description": "Optional. By default: the project's .venv (for a git worktree, the main checkout's), then PATH.",
+      "description": "Optional. By default: the first .venv with pyrefly among the project, the repository root and, for a git worktree, the main checkout; then PATH.",
       "default": ""
     },
     "indexing_limit": {

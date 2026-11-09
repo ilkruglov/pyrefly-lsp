@@ -400,6 +400,33 @@ def test_disk_watcher_tracks_config_files_migrated_by_auto_mode(tmp_path: Path) 
     assert sorted(p.name for p, _kind in watcher.changes()) == ["mypy.ini", "pyrightconfig.json", "setup.cfg"]
 
 
+def test_disk_watcher_git_limit_counts_only_watched_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The limit caps the files stat'ed on every pass: names that only end like a config don't count.
+    monkeypatch.setattr(proxy, "MAX_GIT_FILES", 3)
+    root = init_repo(tmp_path / "near_limit")
+    for name in ("a.py", "b.py", "c.py"):
+        _touch(root / name, "x = 1\n")
+    _touch(root / "backup-setup.cfg", "[metadata]\n")
+    _touch(root / "old_pyproject.toml", "[project]\n")
+    watcher = proxy.DiskWatcher(root)
+    assert watcher.use_git is True
+    assert watcher.enabled is True
+    assert watcher.snapshot is not None
+    assert sorted(p.name for p in watcher.snapshot) == ["a.py", "b.py", "c.py"]
+
+
+def test_disk_watcher_in_git_switches_off_over_the_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(proxy, "MAX_GIT_FILES", 3)
+    root = init_repo(tmp_path / "over_limit")
+    for name in ("a.py", "b.py", "c.py", "setup.cfg"):
+        _touch(root / name, "x = 1\n")
+    watcher = proxy.DiskWatcher(root)
+    assert watcher.use_git is True
+    assert watcher.enabled is False
+    _touch(root / "d.py", "y = 1\n")
+    assert watcher.changes() == []
+
+
 def test_disk_watcher_keeps_its_snapshot_when_git_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = init_repo(tmp_path / "flaky")
     (root / ".gitignore").write_text("gen/\n")

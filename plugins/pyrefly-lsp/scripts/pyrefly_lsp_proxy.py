@@ -5,11 +5,11 @@ Claude Code tells the server it does not watch files (no `didChangeWatchedFiles`
 `didChange` only for its own edits and passes no settings. Hence what the proxy adds to the
 bare server:
 
-- runs pyrefly from the project's `.venv` (or the main checkout's for a git worktree), else from PATH,
+- runs pyrefly from the first `.venv` found (project, repository root, main checkout of a worktree), else PATH,
   with `lazy-blocking` indexing: find-references is complete from the first request;
 - disk sync: the server learns about files changed outside Claude (git, a formatter,
   another agent), and open documents get the text from disk;
-- a worktree without its own `.venv` gets the main checkout's interpreter (`pythonPath`);
+- a project without its own `.venv` and VIRTUAL_ENV gets `pythonPath` from the repository root or main checkout;
 - type-checking mode for projects without a pyrefly config and the diagnostics switch come from plugin settings;
 - complete outgoing calls: pyrefly loses calls inside `await` and expressions
   (facebook/pyrefly#5486); the proxy adds them using `ast` and go-to-definition.
@@ -243,7 +243,7 @@ def main_checkout(root: Path) -> Path | None:
 
 @dataclass(frozen=True)
 class VenvSearch:
-    """Where to look for .venv: the project and its worktree root, then the main checkout (same subdir, root)."""
+    """Where to look for .venv: the project and its repository root, then the main checkout (same subdir, root)."""
 
     own: tuple[Path, ...]
     main: tuple[Path, ...]
@@ -286,7 +286,7 @@ def _venv_file(base: Path, *names: str) -> Path | None:
 
 
 def interpreter_for(root: Path, env: Mapping[str, str], search: VenvSearch | None = None) -> str | None:
-    """pythonPath if the project itself has no .venv: the worktree root, then the main checkout."""
+    """pythonPath if the project has no .venv and no VIRTUAL_ENV: the repository root, then the main checkout."""
     if env.get("VIRTUAL_ENV") or _venv_file(root, "bin/python", "Scripts/python.exe"):
         return None
     search = search or venv_search(root)
@@ -388,10 +388,15 @@ class DiskWatcher:
         done = _git(self.root, "ls-files", "-z", "-co", "--exclude-standard", "--", *patterns)
         if done is None or done.returncode != 0:
             raise _GitFailed
-        names = [n for n in done.stdout.decode(errors="replace").split("\0") if n]
+        # The patterns also match names that only end like a config (backup-setup.cfg): filter before counting.
+        names = [
+            n
+            for n in done.stdout.decode(errors="replace").split("\0")
+            if n and (n.endswith(WATCHED_SUFFIXES) or Path(n).name in WATCHED_NAMES)
+        ]
         if len(names) > MAX_GIT_FILES:
             raise _TooLarge
-        return [self.root / n for n in names if n.endswith(WATCHED_SUFFIXES) or Path(n).name in WATCHED_NAMES]
+        return [self.root / n for n in names]
 
     def _walk(self) -> list[Path]:
         found: list[Path] = []

@@ -6,7 +6,10 @@
 - The full README now lives in the plugin folder, next to the manifest; the repository README is a short
   overview.
 - The README lists what the plugin runs and reads, and states the watched configs, the worktree conditions
-  and the file limit for watching exactly as the code does.
+  and the file limit for watching exactly as the code does; it also says when a request reuses a recent
+  background scan and gives the full lookup order for `pyrefly`.
+- The 50,000-file limit for watching in git counts only the files that are watched: names that merely end
+  like a config, such as `backup-setup.cfg`, no longer count toward it.
 
 ## 1.0.0 — 2026-11-09
 
@@ -25,12 +28,13 @@ pyrefly 1.4.1 (the plugin README says how):
 - Find-references is complete from the first request: `lazy-blocking` indexing.
 - Outgoing calls are complete: the proxy adds the calls pyrefly loses inside `await` and expressions
   (facebook/pyrefly#5486).
-- Disk sync: files changed outside Claude are visible to the server from the next request; open documents
-  get the text from disk. Configs that pyrefly migrates in auto mode are watched too: `mypy.ini`,
-  `.mypy.ini`, `setup.cfg`, `pyrightconfig.json`.
-- A git worktree without its own `.venv` uses the main checkout's interpreter and `pyrefly`.
-- `pyrefly` is looked up in the project's `.venv`, then on PATH; without it the proxy returns a clear error
-  instead of crashing.
+- Disk sync: the server learns about files changed outside Claude in the background and before requests;
+  open documents get the text from disk before every request. Configs that pyrefly migrates in auto mode
+  are watched too: `mypy.ini`, `.mypy.ini`, `setup.cfg`, `pyrightconfig.json`.
+- A git worktree without its own `.venv` uses the main checkout's `pyrefly` and, unless a virtual
+  environment is active, its interpreter.
+- `pyrefly` is looked up in the `.venv` of the project, the repository root and the main checkout of a
+  worktree, then on PATH; without it the proxy returns a clear error instead of crashing.
 - Plugin settings: type-checking mode for projects without a config, turning errors off, path to pyrefly,
   indexing limit, switches for disk sync and outgoing-call completion.
 - The proxy runs as `python3 -I`: project files and `PYTHONPATH` cannot shadow its modules.

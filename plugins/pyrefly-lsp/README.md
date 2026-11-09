@@ -56,15 +56,21 @@ python-lsp-server 1.15.0.
   body with `ast`, asks pyrefly for the definition of every call and merges the result with the server's
   reply.
 - **Disk sync**: in the background once a second (less often if walking the tree is slow: at most once per
-  10 walk durations) and before every request from Claude. Changed unopened files go to the server as
-  `workspace/didChangeWatchedFiles`; open documents get the text from disk. The proxy watches `.py`, `.pyi`
-  and the configs pyrefly reads: `pyproject.toml`, `pyrefly.toml`, `mypy.ini`, `.mypy.ini`, `setup.cfg`,
+  10 walk durations) and before requests from Claude. Changed unopened files go to the server as
+  `workspace/didChangeWatchedFiles`; open documents get the text from disk. Open documents are checked
+  before every request. Unopened files are rescanned before a request too, unless the last scan (in the
+  background or for an earlier request) took over 50 ms and finished less than a second ago: an edit made in
+  that window reaches the server with the next background pass. The proxy watches `.py`, `.pyi` and the
+  configs pyrefly reads: `pyproject.toml`, `pyrefly.toml`, `mypy.ini`, `.mypy.ini`, `setup.cfg`,
   `pyrightconfig.json`. The file list comes from `git ls-files` (about 5 ms for 600 files); outside git, from
   a directory walk that skips virtual environments.
-- **Worktrees**: if the project has no `.venv` of its own and no virtual environment is active
-  (`VIRTUAL_ENV`), the server gets `pythonPath` from the worktree root (when the project is its
-  subdirectory), then from the main checkout: the same subdirectory (monorepo), then the root. The proxy looks
-  for the `pyrefly` binary in the same places, starting with the project's own `.venv`.
+- **Worktrees and subdirectories**: if the project has no `.venv` of its own and no virtual environment is
+  active (`VIRTUAL_ENV`), the server gets `pythonPath` from the first `.venv` found: the repository root
+  (when the project is its subdirectory), then, for a git worktree, the main checkout: the same subdirectory
+  (monorepo), then its root.
+- **Finding pyrefly**: the "Path to pyrefly" setting; else the first `.venv` with pyrefly among the project,
+  the repository root (when the project is its subdirectory) and, for a git worktree, the main checkout (the
+  same subdirectory, then its root); else PATH. `VIRTUAL_ENV` does not affect this lookup.
 - **Large trees**: the proxy watches unopened files only if `git ls-files` lists at most 50,000 `.py`, `.pyi`
   and config files (tracked ones plus untracked ones that are not ignored) or, outside git, the tree has at
   most 20,000 entries. On a larger tree only open documents are synced, and the log says so.
@@ -73,15 +79,17 @@ python-lsp-server 1.15.0.
 
 - **Runs** the proxy: `python3 -I <plugin folder>/scripts/pyrefly_lsp_proxy.py`. Its source is in this folder;
   it uses only the Python standard library.
-- **Starts** `pyrefly lsp`: from the "Path to pyrefly" setting, else from the project's `.venv` (for a
-  worktree, the main checkout's), else from PATH. The plugin does not install pyrefly.
-- **Runs git**, read-only, in the project directory: `git rev-parse` (is the project in a work tree, and where
-  is the main checkout of a worktree), `git check-ignore` and `git ls-files` (which files to watch).
+- **Starts** `pyrefly lsp`, found as described in "Finding pyrefly" above. The plugin does not install
+  pyrefly.
+- **Runs git**, read-only, in the project directory: `git rev-parse` (is the project in a work tree, where
+  are the repository root and the main checkout of a worktree), `git check-ignore` and `git ls-files`
+  (which files to watch).
 - **Reads** sizes and modification times of the watched files; the text of open documents and of any file
   that pyrefly's definitions point to (project files, libraries, standard-library stubs); whether a `.venv`
   has `bin/python` and `bin/pyrefly` (`Scripts/python.exe` and `Scripts/pyrefly.exe` on Windows).
 - **Reads environment variables**: the `PYREFLY_LSP_*` values that Claude Code fills in from the plugin
-  settings, `VIRTUAL_ENV` and `CLAUDE_PROJECT_DIR`.
+  settings; `PYREFLY_LSP_INDEXING_MODE`, which only the environment sets (an indexing mode other than
+  `lazy-blocking`, for troubleshooting); `VIRTUAL_ENV` and `CLAUDE_PROJECT_DIR`.
 - **Does not** write files or make network requests. The proxy logs to the server's stderr
   (`claude --debug`).
 
@@ -129,7 +137,7 @@ The new version loads in the next Claude Code session. What changed: see the
 | Type errors after edits | on | Turn off if a linter hook already reports them: navigation keeps working |
 | Sync with disk | on | Turn off only for troubleshooting |
 | Complete outgoing calls | on | Turn off only for troubleshooting |
-| Path to pyrefly | empty | By default, the project's `.venv` (for a worktree, the main checkout's), then PATH |
+| Path to pyrefly | empty | By default, the first `.venv` with pyrefly: the project's, the repository root's, the main checkout's for a git worktree; then PATH |
 | Indexing limit | 0 | How many project files pyrefly indexes; 0 keeps its default (2000). Higher gives more complete find-references on large projects but uses more memory: about 0.5 GB for 600 files |
 
 ## Project configuration
