@@ -1,6 +1,6 @@
 {
   "name": "pyrefly-lsp",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Python LSP on pyrefly: complete find-references and outgoing calls, sync with disk, git worktrees without their own .venv. Install the pyrefly binary separately: uv tool install pyrefly.",
   "author": {
     "name": "ilkruglov"
@@ -52,7 +52,7 @@
     "pyrefly_path": {
       "type": "string",
       "title": "Path to pyrefly",
-      "description": "Optional. By default: the first .venv with pyrefly among the project, the repository root and, for a git worktree, the main checkout; then PATH.",
+      "description": "Optional. By default: pyrefly from the project's .venv, venv or env up to the repository root, then the main checkout's for a git worktree; then PATH.",
       "default": ""
     },
     "indexing_limit": {

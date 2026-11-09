@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.1 — 2026-11-09
+## 1.1.0 — 2026-11-09
 
 - Documentation, plugin settings, log messages and code comments are in English.
 - The full README now lives in the plugin folder, next to the manifest; the repository README is a short
@@ -10,6 +10,19 @@
   background scan and gives the full lookup order for `pyrefly`.
 - The 50,000-file limit for watching in git counts only the files that are watched: names that merely end
   like a config, such as `backup-setup.cfg`, no longer count toward it.
+- The server gets an interpreter as `pythonPath` only when pyrefly would find no environment by itself: none
+  usable is active (a stale `VIRTUAL_ENV` or `CONDA_PREFIX` no longer counts) and there is no `.venv`, `venv`
+  or `env` with a `pyvenv.cfg` and `bin/python` up to the repository root. It is the project's own
+  environment that pyrefly passes by (a conda one without `pyvenv.cfg`), else, in a git worktree, the main
+  checkout's (where a conda one counts too). Everything else is left to pyrefly, so outside those cases the
+  server sees the same libraries as `pyrefly check`.
+- pyrefly itself is taken from `.venv`, `venv` or `env` with an interpreter (`pyvenv.cfg` or not) from the
+  session directory up to the repository root, then from the main checkout's, then from PATH: an old pyrefly
+  in an active environment or above the repository, or left in a deleted environment, no longer shadows the
+  project's.
+- The main checkout of a worktree comes from git's `core.worktree` (a submodule's worktree, including with
+  `extensions.worktreeConfig`, a `~` path or an included config file); bare repositories have none. git itself
+  parses these values. No longer needs git 2.31 (`--path-format`); works with a session opened through a symlink.
 
 ## 1.0.0 — 2026-11-09
 

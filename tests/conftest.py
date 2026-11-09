@@ -53,7 +53,9 @@ class LspClient:
 
     def __init__(self, root: Path, env: dict[str, str] | None = None, command: list[str] | None = None) -> None:
         self.root = root
-        full_env = {**os.environ, **(env or {})}
+        # An active environment on the machine running the tests would change which environment the proxy picks.
+        inherited = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "CONDA_PREFIX")}
+        full_env = {**inherited, **(env or {})}
         self.proc = subprocess.Popen(
             command or [sys.executable, str(PROXY)],
             cwd=root,

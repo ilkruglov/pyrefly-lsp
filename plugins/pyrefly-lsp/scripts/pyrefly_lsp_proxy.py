@@ -5,11 +5,11 @@ Claude Code tells the server it does not watch files (no `didChangeWatchedFiles`
 `didChange` only for its own edits and passes no settings. Hence what the proxy adds to the
 bare server:
 
-- runs pyrefly from the first `.venv` found (project, repository root, main checkout of a worktree), else PATH,
+- runs pyrefly from the project's environment (or the main checkout's for a git worktree), else from PATH,
   with `lazy-blocking` indexing: find-references is complete from the first request;
 - disk sync: the server learns about files changed outside Claude (git, a formatter,
   another agent), and open documents get the text from disk;
-- a project without its own `.venv` and VIRTUAL_ENV gets `pythonPath` from the repository root or main checkout;
+- an environment pyrefly would not find (a conda one, or the main checkout's for a worktree) as `pythonPath`;
 - type-checking mode for projects without a pyrefly config and the diagnostics switch come from plugin settings;
 - complete outgoing calls: pyrefly loses calls inside `await` and expressions
   (facebook/pyrefly#5486); the proxy adds them using `ast` and go-to-definition.
@@ -35,7 +35,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Union
@@ -48,6 +48,8 @@ INDEXING_MODES = ("lazy-blocking", "lazy-non-blocking-background", "none")
 WATCHED_SUFFIXES = (".py", ".pyi")
 # Configs that pyrefly reads itself or migrates in auto mode.
 WATCHED_NAMES = ("pyproject.toml", "pyrefly.toml", "mypy.ini", ".mypy.ini", "setup.cfg", "pyrightconfig.json")
+# Environment directories, in pyrefly's order within one directory.
+ENV_DIRS = (".venv", "venv", "env")
 SKIP_DIRS = {"node_modules", "__pycache__", "build", "dist", "target", "site-packages"}
 # Outside git, walking the tree every second is costly: on a large tree, watching unopened files is off.
 MAX_WALK_ENTRIES = 20_000
@@ -230,44 +232,39 @@ def _git_lines(root: Path, *args: str) -> list[str] | None:
     return done.stdout.decode(errors="replace").splitlines()
 
 
-def main_checkout(root: Path) -> Path | None:
-    """The repository's main checkout if root is an additional git worktree."""
-    lines = _git_lines(root, "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir")
-    if not lines or len(lines) < 2:
-        return None
-    common, own = Path(lines[0]).resolve(), Path(lines[1]).resolve()
-    if common == own or common.name != ".git":
-        return None
-    return common.parent
+def repo_layout(root: Path) -> tuple[Path | None, Path | None]:
+    """(repository root, main working tree if root is in a linked git worktree); None where it does not apply.
+    A linked worktree may have no known main working tree: a bare repository, or --separate-git-dir."""
+    # No --path-format: git before 2.31 would print it back as a line. Relative answers count from root.
+    lines = _git_lines(root, "rev-parse", "--show-toplevel", "--git-common-dir", "--git-dir")
+    if not lines or len(lines) < 3:
+        return None, None
+    top, common, own = (Path(root, line).resolve() for line in lines[:3])
+    if common == own:
+        return top, None  # the main working tree itself, or a submodule: not a linked worktree
+    bare, worktree = _main_core(root, common)
+    if bare:
+        return top, None  # a bare repository has no main working tree
+    if worktree:
+        main = (common / worktree).resolve()  # relative to the git dir, as in submodules
+    elif common.name == ".git":
+        main = common.parent
+    else:
+        return top, None  # --separate-git-dir records no way back to the main working tree
+    return top, (main if main != top and _exists(main / ".git") else None)
 
 
-@dataclass(frozen=True)
-class VenvSearch:
-    """Where to look for .venv: the project and its repository root, then the main checkout (same subdir, root)."""
+def _main_core(root: Path, common: Path) -> tuple[bool, str | None]:
+    """(core.bare, core.worktree) as the main working tree sees them.
 
-    own: tuple[Path, ...]
-    main: tuple[Path, ...]
-
-
-def venv_search(root: Path) -> VenvSearch:
-    own = [root]
-    rel: Path | None = None
-    top = _git_lines(root, "rev-parse", "--show-toplevel")
-    if top:
-        top_path = Path(top[0])
-        try:
-            rel = root.resolve().relative_to(top_path.resolve())
-        except ValueError:
-            rel = None
-        if rel is not None and rel.parts:
-            own.append(top_path)
-    main_paths: list[Path] = []
-    main = main_checkout(root)
-    if main is not None:
-        if rel is not None and rel.parts:
-            main_paths.append(main / rel)
-        main_paths.append(main)
-    return VenvSearch(tuple(own), tuple(main_paths))
+    git reads them as the main working tree: the common git dir with its config.worktree when
+    extensions.worktreeConfig is on, includes and includeIf evaluated for that git dir, booleans parsed and "~"
+    expanded. The explicit --work-tree keeps git from changing into core.worktree first.
+    """
+    context = (f"--git-dir={common}", f"--work-tree={root}", "config", "--includes")
+    bare = _git_lines(root, *context, "--bool", "--get", "core.bare")
+    worktree = _git_lines(root, *context, "--path", "--get", "core.worktree")
+    return bare == ["true"], (worktree[0] if worktree and worktree[0] else None)
 
 
 def _exists(path: Path) -> bool:
@@ -277,41 +274,127 @@ def _exists(path: Path) -> bool:
         return False
 
 
-def _venv_file(base: Path, *names: str) -> Path | None:
+def _first_existing(base: Path, *names: str) -> Path | None:
     for name in names:
-        path = base / ".venv" / name
+        path = base / name
         if _exists(path):
             return path
     return None
 
 
-def interpreter_for(root: Path, env: Mapping[str, str], search: VenvSearch | None = None) -> str | None:
-    """pythonPath if the project has no .venv and no VIRTUAL_ENV: the repository root, then the main checkout."""
-    if env.get("VIRTUAL_ENV") or _venv_file(root, "bin/python", "Scripts/python.exe"):
+# Interpreters pyrefly 1.4.1 looks for in an environment; conda on Windows also keeps python.exe at its root.
+PYREFLY_INTERPRETERS = ("bin/python", "Scripts/python.exe")
+ANY_INTERPRETER = (*PYREFLY_INTERPRETERS, "bin/python3", "python.exe")
+
+
+def _interpreter_in(env_dir: Path) -> Path | None:
+    """The interpreter of an environment we hand over explicitly."""
+    return _first_existing(env_dir, *ANY_INTERPRETER)
+
+
+def _pyrefly_in(env_dir: Path) -> Path | None:
+    return _first_existing(env_dir, "bin/pyrefly", "Scripts/pyrefly.exe")
+
+
+def _pyrefly_takes(env_dir: Path) -> bool:
+    """An environment pyrefly 1.4.1 finds by itself (measured): a pyvenv.cfg and bin/python. A conda environment
+    made with `conda create -p .venv` has no pyvenv.cfg, and pyrefly passes it by."""
+    return _exists(env_dir / "pyvenv.cfg") and _first_existing(env_dir, *PYREFLY_INTERPRETERS) is not None
+
+
+def _active_environment(root: Path, env: Mapping[str, str]) -> bool:
+    """An active environment pyrefly 1.4.1 uses (measured): VIRTUAL_ENV that pyrefly takes, or CONDA_PREFIX with
+    an interpreter (conda's auto-activated base included). A stale value does not count; a relative one counts
+    from the project root, the server's working directory."""
+    venv, conda = env.get("VIRTUAL_ENV"), env.get("CONDA_PREFIX")
+    if venv and _pyrefly_takes(root / venv):
+        return True
+    return bool(conda) and _interpreter_in(root / conda) is not None
+
+
+@dataclass(frozen=True)
+class Layout:
+    """Where the session sits in git; computed once at startup.
+
+    root: the session directory as given. own: its real path and parents up to the repository root (just the
+    session directory outside git). main: in a linked worktree, the main checkout's counterpart of root and its
+    parents up to the main checkout's root.
+    """
+
+    root: Path
+    own: tuple[Path, ...]
+    main: tuple[Path, ...]
+
+
+def discover(root: Path) -> Layout:
+    root = root if root.is_absolute() else Path.cwd() / root
+    top, main = repo_layout(root)
+    if top is None:
+        return Layout(root, (root,), ())
+    try:
+        real = root.resolve()
+    except (OSError, RuntimeError):  # a symlink loop
+        real = root
+    if real != top and top not in real.parents:
+        log(f"git reports the repository root {top}, which does not contain {real}: treating it as outside git")
+        return Layout(root, (root,), ())
+    own = (real, *(d for d in real.parents if d == top or top in d.parents))
+    chain: list[Path] = []
+    if main is not None:
+        d = main / real.relative_to(top)
+        chain.append(d)
+        while d != main and d.parent != d:
+            d = d.parent
+            chain.append(d)
+    return Layout(root, own, tuple(chain))
+
+
+def _env_dirs(chain: tuple[Path, ...]) -> list[Path]:
+    return [d / name for d in chain for name in ENV_DIRS]
+
+
+def python_path_for(layout: Layout, env: Mapping[str, str]) -> str | None:
+    """pythonPath when pyrefly would find no environment by itself; None leaves the choice to pyrefly.
+
+    pyrefly picks the Python environment as for `pyrefly check`: an interpreter set in its config, an active
+    environment, then the nearest .venv, venv or env with pyvenv.cfg walking up from the project. The proxy steps
+    in only when nothing usable is active and pyrefly takes no environment between the session directory and the
+    repository root: it passes the project's own environment that pyrefly passes by (a conda one, without
+    pyvenv.cfg), else, in a linked worktree, the main checkout's. pyrefly still prefers an interpreter set in
+    its config.
+    """
+    if _active_environment(layout.root, env):
         return None
-    search = search or venv_search(root)
-    for base in (*search.own[1:], *search.main):
-        found = _venv_file(base, "bin/python", "Scripts/python.exe")
-        if found:
-            return str(found)
-    return None
+    own = _env_dirs(layout.own)
+    if any(_pyrefly_takes(e) for e in own):
+        return None
+    candidates = own + _env_dirs(layout.main)
+    python = next((found for e in candidates if (found := _interpreter_in(e)) is not None), None)
+    return str(python) if python is not None else None
+
+
+def pyrefly_candidates(layout: Layout) -> list[Path]:
+    """Environments to look for the pyrefly binary in before PATH: .venv, venv and env with an interpreter from the
+    session directory up to the repository root, then the main checkout's counterparts.
+
+    pyvenv.cfg is not required (a conda environment has none), but an interpreter is: what is left of a deleted
+    environment does not count. Active environments are reached through PATH, which activation puts first, so an
+    old pyrefly in conda's auto-activated base does not shadow the one pinned in the project; nothing above the
+    repository is searched either.
+    """
+    return [e for e in _env_dirs((*layout.own, *layout.main)) if _interpreter_in(e) is not None]
 
 
 def pyrefly_command(
-    root: Path,
     settings: Settings,
+    candidates: Callable[[], Sequence[Path]],
     which: Callable[[str], str | None] = shutil.which,
-    search: VenvSearch | None = None,
 ) -> list[str] | None:
+    """The pyrefly binary from the setting, else from the first candidate that has it, else from PATH. The
+    candidates are looked up only without the setting."""
     binary = settings.pyrefly
     if not binary:
-        search = search or venv_search(root)
-        for base in (*search.own, *search.main):
-            found = _venv_file(base, "bin/pyrefly", "Scripts/pyrefly.exe")
-            if found:
-                binary = str(found)
-                break
-    binary = binary or which("pyrefly")
+        binary = next((str(found) for d in candidates() if (found := _pyrefly_in(d))), None) or which("pyrefly")
     if not binary:
         return None
     command = [binary, "lsp", "--indexing-mode", settings.indexing_mode]
@@ -833,8 +916,8 @@ class Proxy:
     def start(self, msg: dict[str, Any]) -> None:
         params = dict(msg.get("params") or {})
         root = _root_from(params, self.env)
-        search = venv_search(root)
-        command = pyrefly_command(root, self.settings, search=search)
+        layout = discover(root)
+        command = pyrefly_command(self.settings, lambda: pyrefly_candidates(layout))
         problem = "pyrefly not found: install it (uv tool install pyrefly) or set its path in the plugin settings"
         if command is not None:
             try:
@@ -846,9 +929,9 @@ class Proxy:
             self.to_client({"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32603, "message": problem}})
             self.exit_code = 1
             return
-        python_path = interpreter_for(root, self.env, search=search)
+        python_path = python_path_for(layout, self.env)
         if python_path:
-            log(f"the project has no .venv of its own, using interpreter {python_path}")
+            log(f"pyrefly would find no Python environment here: passing {python_path} as pythonPath")
         params["initializationOptions"] = init_options(params.get("initializationOptions"), self.settings, python_path)
         threading.Thread(target=self.from_server, daemon=True).start()
         self.to_server({**msg, "params": params})

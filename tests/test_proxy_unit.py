@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -90,22 +91,14 @@ def _fake_executable(path: Path) -> Path:
     return path
 
 
-def test_main_checkout_of_worktree(tmp_path: Path) -> None:
-    main, wt = _repo_with_worktree(tmp_path)
-    assert proxy.main_checkout(wt) == main.resolve()
-    assert proxy.main_checkout(main) is None
-    assert proxy.main_checkout(tmp_path / "not-a-repo") is None
-
-
-def test_interpreter_for_worktree_uses_main_venv(tmp_path: Path) -> None:
-    main, wt = _repo_with_worktree(tmp_path)
-    python = _fake_executable(main / ".venv" / "bin" / "python")
-    assert proxy.interpreter_for(wt, {}) == str(python)
-    # The project itself has a .venv or an active environment: pyrefly finds it, nothing to override.
-    assert proxy.interpreter_for(main, {}) is None
-    assert proxy.interpreter_for(wt, {"VIRTUAL_ENV": "/somewhere"}) is None
-    _fake_executable(wt / ".venv" / "bin" / "python")
-    assert proxy.interpreter_for(wt, {}) is None
+@pytest.fixture
+def confined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Environment lookup sees nothing outside tmp_path: no .venv or repository above it."""
+    real_exists = proxy._exists
+    prefix = str(tmp_path) + os.sep
+    monkeypatch.setattr(proxy, "_exists", lambda path: str(path).startswith(prefix) and real_exists(path))
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    return tmp_path
 
 
 def _binary(command: list[str] | None) -> str:
@@ -113,24 +106,324 @@ def _binary(command: list[str] | None) -> str:
     return command[0]
 
 
-def test_pyrefly_command_prefers_project_then_main_then_path(tmp_path: Path) -> None:
+def _venv(path: Path, *, pyrefly: bool = False) -> Path:
+    """An environment the way pyrefly recognizes it: pyvenv.cfg plus bin/python."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    _fake_executable(path / "bin" / "python")
+    if pyrefly:
+        _fake_executable(path / "bin" / "pyrefly")
+    return path
+
+
+def _python_path(root: Path, env: dict[str, str] | None = None) -> str | None:
+    found = proxy.python_path_for(proxy.discover(root), env or {})
+    return None if found is None else str(Path(found).resolve())
+
+
+def _pyrefly(root: Path, setting: str = "") -> str:
+    settings = proxy.Settings.from_env({"PYREFLY_LSP_PYREFLY": setting} if setting else {})
+    command = proxy.pyrefly_command(settings, lambda: proxy.pyrefly_candidates(proxy.discover(root)), lambda _n: "PATH")
+    binary = _binary(command)
+    return binary if binary in ("PATH", setting) else str(Path(binary).resolve())
+
+
+def _python(env_dir: Path) -> str:
+    return str((env_dir / "bin" / "python").resolve())
+
+
+@pytest.mark.usefixtures("confined")
+def test_repo_layout(tmp_path: Path) -> None:
     main, wt = _repo_with_worktree(tmp_path)
-    settings = proxy.Settings.from_env({})
-    on_path = lambda _name: "/usr/bin/pyrefly"  # noqa: E731
-    nowhere = lambda _name: None  # noqa: E731
-    assert proxy.pyrefly_command(wt, settings, on_path) == [
-        "/usr/bin/pyrefly",
-        "lsp",
-        "--indexing-mode",
-        "lazy-blocking",
-    ]
-    assert proxy.pyrefly_command(wt, settings, nowhere) is None
-    from_main = _fake_executable(main / ".venv" / "bin" / "pyrefly")
-    assert _binary(proxy.pyrefly_command(wt, settings, on_path)) == str(from_main)
-    own = _fake_executable(wt / ".venv" / "bin" / "pyrefly")
-    assert _binary(proxy.pyrefly_command(wt, settings, on_path)) == str(own)
-    explicit = proxy.Settings.from_env({"PYREFLY_LSP_PYREFLY": "/opt/pyrefly"})
-    assert _binary(proxy.pyrefly_command(wt, explicit, on_path)) == "/opt/pyrefly"
+    assert proxy.repo_layout(wt) == (wt.resolve(), main.resolve())
+    assert proxy.repo_layout(main) == (main.resolve(), None)
+    assert proxy.repo_layout(tmp_path / "not-a-repo") == (None, None)
+
+
+@pytest.mark.usefixtures("confined")
+def test_repo_layout_edge_cases(tmp_path: Path) -> None:
+    allow = ("-c", "protocol.file.allow=always", "-c", "user.name=t", "-c", "user.email=t@t")
+    # --separate-git-dir records no way back to the main working tree.
+    sep = tmp_path / "sep"
+    git(tmp_path, "init", "-q", "--separate-git-dir", str(tmp_path / "meta.git"), str(sep))
+    git(sep, *allow, "commit", "-q", "--allow-empty", "-m", "init")
+    git(sep, "worktree", "add", "-q", str(tmp_path / "sep-wt"))
+    assert proxy.repo_layout(tmp_path / "sep-wt")[1] is None
+    # A submodule's worktree: core.worktree, even when kept in config.worktree (extensions.worktreeConfig).
+    lib = init_repo(tmp_path / "lib")
+    git(lib, *allow, "commit", "-q", "--allow-empty", "-m", "lib")
+    sup = init_repo(tmp_path / "super")
+    git(sup, *allow, "submodule", "add", "-q", str(lib), "lib")
+    git(sup / "lib", *allow, "worktree", "add", "-q", str(tmp_path / "lib-wt"))
+    assert proxy.repo_layout(tmp_path / "lib-wt")[1] == (sup / "lib").resolve()
+    git(sup / "lib", "config", "extensions.worktreeConfig", "true")
+    worktree = subprocess.run(
+        ["git", "-C", str(sup / "lib"), "config", "--get", "core.worktree"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    git(sup / "lib", "config", "--unset", "core.worktree")
+    git(sup / "lib", "config", "--worktree", "core.worktree", worktree)
+    assert proxy.repo_layout(tmp_path / "lib-wt")[1] == (sup / "lib").resolve()
+    # A bare repository cloned into .git, with a worktree outside it, has no main working tree.
+    bare = tmp_path / "barerepo"
+    git(tmp_path, "clone", "-q", "--bare", str(lib), str(bare / ".git"))
+    feature = tmp_path / "bare-feature"
+    git(bare / ".git", "worktree", "add", "-q", str(feature))
+    assert proxy.repo_layout(feature)[1] is None
+
+
+@pytest.mark.usefixtures("confined")
+def test_core_bare_is_read_as_git_reads_it(tmp_path: Path) -> None:
+    main, wt = _repo_with_worktree(tmp_path)
+    for value, bare in (("", False), ("false", False), ("2", True), ("-1", True), ("on", True), ("yes", True)):
+        git(main, "config", "core.bare", value)
+        assert (proxy.repo_layout(wt)[1] is None) is bare, value
+    git(main, "config", "--unset", "core.bare")
+    config = main / ".git" / "config"
+    config.write_text(config.read_text() + "[core]\n\tbare\n")  # a key with no value is true
+    assert proxy.repo_layout(wt)[1] is None
+
+
+@pytest.mark.usefixtures("confined")
+def test_worktree_without_environment_gets_the_main_checkout_interpreter(tmp_path: Path) -> None:
+    main, wt = _repo_with_worktree(tmp_path)
+    main_env = _venv(main / ".venv")
+    assert _python_path(wt) == _python(main_env)
+    # The main checkout's counterpart of the session directory comes before its root.
+    (wt / "backend").mkdir()
+    backend_env = _venv(main / "backend" / ".venv")
+    assert _python_path(wt / "backend") == _python(backend_env)
+    # The main checkout itself, an active environment, or an environment of the worktree's own: pyrefly decides.
+    assert _python_path(main) is None
+    assert _python_path(wt, {"VIRTUAL_ENV": str(_venv(tmp_path / "active"))}) is None
+    conda = tmp_path / "conda"
+    _fake_executable(conda / "bin" / "python")
+    assert _python_path(wt, {"CONDA_PREFIX": str(conda)}) is None
+    # An active environment pyrefly 1.4.1 would skip (measured) does not block the main checkout's: deleted, no
+    # interpreter, or a VIRTUAL_ENV without pyvenv.cfg or with only bin/python3.
+    no_python = tmp_path / "no_python"
+    no_python.mkdir()
+    no_cfg = tmp_path / "no_cfg"
+    _fake_executable(no_cfg / "bin" / "python")
+    python3_only = tmp_path / "python3_only"
+    (python3_only / "pyvenv.cfg").parent.mkdir()
+    (python3_only / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    _fake_executable(python3_only / "bin" / "python3")
+    for env in (
+        {"VIRTUAL_ENV": str(tmp_path / "deleted")},
+        {"VIRTUAL_ENV": str(no_python)},
+        {"VIRTUAL_ENV": str(no_cfg)},
+        {"VIRTUAL_ENV": str(python3_only)},
+        {"CONDA_PREFIX": ""},
+    ):
+        assert _python_path(wt, env) == _python(main_env), env
+    _venv(wt / ".venv")
+    assert _python_path(wt / "backend") is None
+
+
+@pytest.mark.usefixtures("confined")
+def test_an_environment_is_a_known_directory_with_an_interpreter(tmp_path: Path) -> None:
+    main, wt = _repo_with_worktree(tmp_path)
+    _venv(main / ".venv-3.12")  # not a name we look for
+    broken = _venv(main / "venv")
+    (broken / "bin" / "python").unlink()  # no interpreter
+    assert _python_path(wt) is None
+    conda_env = main / "env"  # `conda create -p env`: an interpreter but no pyvenv.cfg
+    _fake_executable(conda_env / "bin" / "python")
+    assert _python_path(wt) == _python(conda_env)
+    # The worktree's own conda environment: pyrefly does not recognize it, so the server gets its interpreter.
+    own = wt / ".venv"
+    _fake_executable(own / "bin" / "python")
+    assert _python_path(wt) == _python(own)
+    # One pyrefly recognizes (pyvenv.cfg and bin/python) needs nothing from us.
+    (own / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    assert _python_path(wt) is None
+
+
+@pytest.mark.usefixtures("confined")
+def test_core_worktree_with_a_home_relative_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # git expands "~" in core.worktree; a submodule's git dir is not named .git, so nothing else finds it.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    allow = ("-c", "protocol.file.allow=always", "-c", "user.name=t", "-c", "user.email=t@t")
+    lib = init_repo(tmp_path / "lib")
+    git(lib, *allow, "commit", "-q", "--allow-empty", "-m", "lib")
+    sup = init_repo(tmp_path / "super")
+    git(sup, *allow, "submodule", "add", "-q", str(lib), "lib")
+    git(sup / "lib", *allow, "worktree", "add", "-q", str(tmp_path / "lib-wt"))
+    git(tmp_path, "config", "--file", str(sup / ".git" / "modules" / "lib" / "config"), "core.worktree", "~/super/lib")
+    assert proxy.repo_layout(tmp_path / "lib-wt")[1] == (sup / "lib").resolve()
+    main_env = _venv(sup / "lib" / ".venv", pyrefly=True)
+    assert _python_path(tmp_path / "lib-wt") == _python(main_env)
+    assert _pyrefly(tmp_path / "lib-wt") == str((main_env / "bin" / "pyrefly").resolve())
+
+
+@pytest.mark.usefixtures("confined")
+def test_project_conda_environment_that_pyrefly_passes_by(tmp_path: Path) -> None:
+    # Not only in a worktree: pyrefly takes no environment without pyvenv.cfg, so the server gets it explicitly.
+    repo = init_repo(tmp_path / "repo")
+    (repo / "backend").mkdir()
+    conda = repo / ".venv"
+    _fake_executable(conda / "bin" / "python")
+    assert _python_path(repo / "backend") == _python(conda)
+    (conda / "pyvenv.cfg").write_text("home = /usr/bin\n")  # now pyrefly takes it itself
+    assert _python_path(repo / "backend") is None
+    plain = tmp_path / "plain"
+    _fake_executable(plain / "env" / "bin" / "python")
+    assert _python_path(plain) == _python(plain / "env")
+    assert _python_path(repo / "backend", {"VIRTUAL_ENV": str(_venv(tmp_path / "active"))}) is None
+
+
+@pytest.mark.usefixtures("confined")
+def test_worktree_inside_its_main_checkout(tmp_path: Path) -> None:
+    # Claude Code puts worktrees in <repo>/.claude/worktrees/<name>.
+    main, _wt = _repo_with_worktree(tmp_path)
+    feat = main / ".claude" / "worktrees" / "feat"
+    git(main, "worktree", "add", "-q", str(feat))
+    main_env = _venv(main / ".venv", pyrefly=True)
+    assert _python_path(feat) == _python(main_env)  # the same environment pyrefly reaches by walking up
+    assert _pyrefly(feat) == str((main_env / "bin" / "pyrefly").resolve())
+
+
+@NOT_ROOT
+@pytest.mark.usefixtures("confined")
+def test_unreadable_environment_is_skipped(tmp_path: Path) -> None:
+    main, wt = _repo_with_worktree(tmp_path)
+    main_env = _venv(main / ".venv")
+    locked = _venv(wt / ".venv")
+    locked.chmod(0)
+    try:
+        assert _python_path(wt) == _python(main_env)
+        assert _pyrefly(wt) == "PATH"
+    finally:
+        locked.chmod(0o755)
+
+
+@pytest.mark.usefixtures("confined")
+def test_stale_config_worktree_is_ignored_without_the_extension(tmp_path: Path) -> None:
+    main, wt = _repo_with_worktree(tmp_path)
+    (main / ".git" / "config.worktree").write_text("[core]\n\tbare = true\n")  # git ignores it: extension off
+    assert proxy.repo_layout(wt)[1] == main.resolve()
+    git(main, "config", "extensions.worktreeConfig", "true")
+    assert proxy.repo_layout(wt)[1] is None
+
+
+@pytest.mark.usefixtures("confined")
+def test_pyrefly_is_taken_only_from_a_directory_with_an_interpreter(tmp_path: Path) -> None:
+    root = init_repo(tmp_path / "proj")
+    _fake_executable(root / ".venv" / "bin" / "pyrefly")  # what is left of a deleted environment
+    assert _pyrefly(root) == "PATH"
+    venv_dir = _venv(root / "venv", pyrefly=True)
+    assert _pyrefly(root) == str((venv_dir / "bin" / "pyrefly").resolve())
+
+
+@pytest.mark.usefixtures("confined")
+def test_git_reads_the_config_values(tmp_path: Path) -> None:
+    # Booleans such as 0x1 and 1k, and core.worktree from an included file, as git reads them.
+    main, wt = _repo_with_worktree(tmp_path)
+    for value in ("0x1", "1k"):
+        git(main, "config", "core.bare", value)
+        assert proxy.repo_layout(wt)[1] is None, value
+    git(main, "config", "--unset", "core.bare")
+    allow = ("-c", "protocol.file.allow=always", "-c", "user.name=t", "-c", "user.email=t@t")
+    lib = init_repo(tmp_path / "lib")
+    git(lib, *allow, "commit", "-q", "--allow-empty", "-m", "lib")
+    sup = init_repo(tmp_path / "super")
+    git(sup, *allow, "submodule", "add", "-q", str(lib), "lib")
+    git(sup / "lib", *allow, "worktree", "add", "-q", str(tmp_path / "lib-wt"))
+    modules = sup / ".git" / "modules" / "lib"
+    worktree = subprocess.run(
+        ["git", "config", "--file", str(modules / "config"), "--get", "core.worktree"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    git(tmp_path, "config", "--file", str(modules / "config"), "--unset", "core.worktree")
+    (modules / "shared.conf").write_text(f"[core]\n\tworktree = {worktree}\n")
+    git(tmp_path, "config", "--file", str(modules / "config"), "include.path", "shared.conf")
+    assert proxy.repo_layout(tmp_path / "lib-wt")[1] == (sup / "lib").resolve()
+    # A conditional include for the submodule's own git dir, evaluated as the main working tree sees it.
+    git(tmp_path, "config", "--file", str(modules / "config"), "--unset", "include.path")
+    git(
+        tmp_path,
+        "config",
+        "--file",
+        str(modules / "config"),
+        f"includeIf.gitdir:{modules.resolve()}.path",
+        "shared.conf",
+    )
+    assert proxy.repo_layout(tmp_path / "lib-wt")[1] == (sup / "lib").resolve()
+
+
+@pytest.mark.usefixtures("confined")
+def test_worktree_without_a_known_main_checkout_still_uses_its_own_conda_environment(tmp_path: Path) -> None:
+    allow = ("-c", "user.name=t", "-c", "user.email=t@t")
+    sep = tmp_path / "sep"
+    git(tmp_path, "init", "-q", "--separate-git-dir", str(tmp_path / "meta.git"), str(sep))
+    git(sep, *allow, "commit", "-q", "--allow-empty", "-m", "init")
+    wt = tmp_path / "sep-wt"
+    git(sep, "worktree", "add", "-q", str(wt))
+    own = wt / ".venv"
+    _fake_executable(own / "bin" / "python")  # conda: no pyvenv.cfg, pyrefly passes it by
+    assert _python_path(wt) == _python(own)
+
+
+@pytest.mark.usefixtures("confined")
+def test_pyrefly_binary_sources(tmp_path: Path) -> None:
+    root = init_repo(tmp_path / "proj")
+    (root / "pkg").mkdir()
+    assert _pyrefly(root / "pkg") == "PATH"
+    assert _pyrefly(root / "pkg", "/opt/pyrefly") == "/opt/pyrefly"
+    env_dir = _venv(root / ".venv")
+    assert _pyrefly(root / "pkg") == "PATH"
+    _fake_executable(env_dir / "bin" / "pyrefly")
+    assert _pyrefly(root / "pkg") == str((env_dir / "bin" / "pyrefly").resolve())  # up to the repository root
+    # Candidates are the project's directories and the main checkout's only: active environments are reached
+    # through PATH, which activation puts first, so an old pyrefly in conda's auto-activated base cannot shadow
+    # the one pinned in the project.
+    assert proxy.pyrefly_candidates(proxy.discover(root / "pkg")) == [root.resolve() / ".venv"]
+    # A conda environment made with `conda create -p .venv` has no pyvenv.cfg but may hold pyrefly.
+    conda_proj = tmp_path / "conda_proj"
+    _fake_executable(conda_proj / ".venv" / "bin" / "python")
+    binary = _fake_executable(conda_proj / ".venv" / "bin" / "pyrefly")
+    assert _pyrefly(conda_proj) == str(binary.resolve())
+    # A worktree: its own environment without pyrefly falls back to the main checkout's counterpart, then root.
+    main, wt = _repo_with_worktree(tmp_path / "w")
+    _venv(wt / ".venv")
+    (wt / "backend").mkdir()
+    main_env = _venv(main / ".venv", pyrefly=True)
+    assert _pyrefly(wt / "backend") == str((main_env / "bin" / "pyrefly").resolve())
+    backend_env = _venv(main / "backend" / ".venv", pyrefly=True)
+    assert _pyrefly(wt / "backend") == str((backend_env / "bin" / "pyrefly").resolve())
+    assert proxy.pyrefly_command(proxy.Settings.from_env({}), list, lambda _name: None) is None
+
+
+@pytest.mark.usefixtures("confined")
+def test_session_through_a_symlink_to_a_subdirectory(tmp_path: Path) -> None:
+    # ~/work/backend -> /data/repo/backend: the repository's parents count, not the symlink's.
+    repo = init_repo(tmp_path / "data" / "repo")
+    (repo / "backend").mkdir()
+    env_dir = _venv(repo / ".venv", pyrefly=True)
+    (tmp_path / "work").mkdir()
+    alias = tmp_path / "work" / "backend"
+    alias.symlink_to(repo / "backend", target_is_directory=True)
+    assert _pyrefly(alias) == str((env_dir / "bin" / "pyrefly").resolve())
+    main, wt = _repo_with_worktree(tmp_path / "w")
+    _venv(main / ".venv")
+    (wt / "pkg").mkdir()
+    _venv(wt / ".venv")
+    wt_alias = tmp_path / "work" / "pkg"
+    wt_alias.symlink_to(wt / "pkg", target_is_directory=True)
+    assert _python_path(wt_alias) is None  # the worktree has an environment of its own
+
+
+@pytest.mark.usefixtures("confined")
+def test_pyrefly_is_not_searched_above_the_repository(tmp_path: Path) -> None:
+    _venv(tmp_path / "outer" / ".venv", pyrefly=True)
+    repo = init_repo(tmp_path / "outer" / "repo")
+    assert _pyrefly(repo) == "PATH"
+    # Outside git, only the session directory itself.
+    plain = tmp_path / "outer" / "plain"
+    plain.mkdir()
+    assert _pyrefly(plain) == "PATH"
 
 
 def test_init_options_merge() -> None:
@@ -367,28 +660,6 @@ def test_unopened_changes_compare_paths_not_uri_strings(tmp_path: Path) -> None:
 def test_settings_expand_user_in_pyrefly_path() -> None:
     s = proxy.Settings.from_env({"PYREFLY_LSP_PYREFLY": "~/.local/bin/pyrefly"})
     assert s.pyrefly == str(Path.home() / ".local" / "bin" / "pyrefly")
-
-
-def test_worktree_subdirectory_uses_matching_main_subdirectory(tmp_path: Path) -> None:
-    main, wt = _repo_with_worktree(tmp_path)
-    (wt / "backend").mkdir()
-    python = _fake_executable(main / "backend" / ".venv" / "bin" / "python")
-    binary = _fake_executable(main / "backend" / ".venv" / "bin" / "pyrefly")
-    assert proxy.interpreter_for(wt / "backend", {}) == str(python)
-    settings = proxy.Settings.from_env({})
-    assert _binary(proxy.pyrefly_command(wt / "backend", settings, lambda _n: None)) == str(binary)
-
-
-def test_worktree_subdirectory_prefers_the_worktree_own_venv(tmp_path: Path) -> None:
-    main, wt = _repo_with_worktree(tmp_path)
-    (wt / "backend").mkdir()
-    _fake_executable(main / ".venv" / "bin" / "python")
-    _fake_executable(main / ".venv" / "bin" / "pyrefly")
-    own_python = _fake_executable(wt / ".venv" / "bin" / "python")
-    own_binary = _fake_executable(wt / ".venv" / "bin" / "pyrefly")
-    assert proxy.interpreter_for(wt / "backend", {}) == str(own_python)
-    settings = proxy.Settings.from_env({})
-    assert _binary(proxy.pyrefly_command(wt / "backend", settings, lambda _n: None)) == str(own_binary)
 
 
 def test_disk_watcher_tracks_config_files_migrated_by_auto_mode(tmp_path: Path) -> None:
@@ -758,19 +1029,6 @@ def test_unreadable_directory_outside_git_does_not_break_the_watcher(tmp_path: P
         locked.chmod(0o755)
 
 
-@NOT_ROOT
-def test_unreadable_venv_falls_back_to_path(tmp_path: Path) -> None:
-    root = tmp_path / "lockedvenv"
-    (root / ".venv").mkdir(parents=True)
-    (root / ".venv").chmod(0)
-    try:
-        command = proxy.pyrefly_command(root, proxy.Settings.from_env({}), lambda _n: "/usr/bin/pyrefly")
-        assert _binary(command) == "/usr/bin/pyrefly"
-        assert proxy.interpreter_for(root, {}) is None
-    finally:
-        (root / ".venv").chmod(0o755)
-
-
 def test_poll_keeps_syncing_open_documents_when_the_watcher_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -882,12 +1140,12 @@ def test_a_broken_document_does_not_lose_found_changes(tmp_path: Path) -> None:
 
 def test_indexing_limit_is_passed_to_pyrefly(tmp_path: Path) -> None:
     settings = proxy.Settings.from_env({"PYREFLY_LSP_INDEXING_LIMIT": "10000"})
-    command = proxy.pyrefly_command(tmp_path, settings, lambda _n: "/usr/bin/pyrefly")
+    command = proxy.pyrefly_command(settings, list, lambda _n: "/usr/bin/pyrefly")
     assert command is not None
     assert command[-2:] == ["--workspace-indexing-limit", "10000"]
     assert proxy.Settings.from_env({"PYREFLY_LSP_INDEXING_LIMIT": "10000.0"}).indexing_limit == 10000
     assert proxy.Settings.from_env({"PYREFLY_LSP_INDEXING_LIMIT": "0"}).indexing_limit is None
-    default = proxy.pyrefly_command(tmp_path, proxy.Settings.from_env({}), lambda _n: "/usr/bin/pyrefly")
+    default = proxy.pyrefly_command(proxy.Settings.from_env({}), list, lambda _n: "/usr/bin/pyrefly")
     assert default is not None
     assert "--workspace-indexing-limit" not in default
 

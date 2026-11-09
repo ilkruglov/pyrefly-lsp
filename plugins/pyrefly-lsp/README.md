@@ -64,13 +64,24 @@ python-lsp-server 1.15.0.
   configs pyrefly reads: `pyproject.toml`, `pyrefly.toml`, `mypy.ini`, `.mypy.ini`, `setup.cfg`,
   `pyrightconfig.json`. The file list comes from `git ls-files` (about 5 ms for 600 files); outside git, from
   a directory walk that skips virtual environments.
-- **Worktrees and subdirectories**: if the project has no `.venv` of its own and no virtual environment is
-  active (`VIRTUAL_ENV`), the server gets `pythonPath` from the first `.venv` found: the repository root
-  (when the project is its subdirectory), then, for a git worktree, the main checkout: the same subdirectory
-  (monorepo), then its root.
-- **Finding pyrefly**: the "Path to pyrefly" setting; else the first `.venv` with pyrefly among the project,
-  the repository root (when the project is its subdirectory) and, for a git worktree, the main checkout (the
-  same subdirectory, then its root); else PATH. `VIRTUAL_ENV` does not affect this lookup.
+- **Python environment**: pyrefly picks it itself, exactly as for `pyrefly check`: an interpreter set in its
+  config, an active environment (`VIRTUAL_ENV`, `CONDA_PREFIX`, including conda's auto-activated base), else the
+  nearest `.venv`, `venv` or `env` with a `pyvenv.cfg` and `bin/python` above the project. The proxy steps in
+  only when pyrefly would find no environment: none usable is active (a stale `VIRTUAL_ENV` or `CONDA_PREFIX`
+  does not count) and pyrefly takes no `.venv`, `venv` or `env` between the session directory and the
+  repository root. Then the server gets an interpreter as `pythonPath`: the project's own environment that
+  pyrefly passes by (a conda one made with `conda create -p .venv` has no `pyvenv.cfg`), else, in a git
+  worktree, the main checkout's, from the session directory's counterpart up to its root. An interpreter set in
+  the pyrefly config still wins. In those cases the server deliberately differs from `pyrefly check`, which
+  would fall back to an environment above the repository or to `python3`. The main checkout comes from git:
+  `core.worktree` (as in a submodule's worktree), else the directory holding `.git`; a bare repository and a
+  `--separate-git-dir` repository have none.
+- **Finding pyrefly**: the "Path to pyrefly" setting; else `bin/pyrefly` from `.venv`, `venv` or `env`
+  directories with an interpreter (no `pyvenv.cfg` needed) from the session directory up to the repository
+  root (outside git, the session directory only),
+  then from the main checkout's counterparts; else PATH, where activating an environment puts its `bin` first.
+  Nothing above the repository and no active environment comes before the project's own pyrefly, so an old
+  pyrefly in conda's auto-activated base cannot shadow the one pinned in the project.
 - **Large trees**: the proxy watches unopened files only if `git ls-files` lists at most 50,000 `.py`, `.pyi`
   and config files (tracked ones plus untracked ones that are not ignored) or, outside git, the tree has at
   most 20,000 entries. On a larger tree only open documents are synced, and the log says so.
@@ -82,14 +93,18 @@ python-lsp-server 1.15.0.
 - **Starts** `pyrefly lsp`, found as described in "Finding pyrefly" above. The plugin does not install
   pyrefly.
 - **Runs git**, read-only, in the project directory: `git rev-parse` (is the project in a work tree, where
-  are the repository root and the main checkout of a worktree), `git check-ignore` and `git ls-files`
-  (which files to watch).
+  are the repository root and its git directories), `git config` for `core.bare` and `core.worktree` of the
+  common git directory (where is the main checkout of a worktree), `git check-ignore` (is the project in an
+  ignored directory of another repository; then its files are watched by walking directories) and
+  `git ls-files` (which files to watch).
 - **Reads** sizes and modification times of the watched files; the text of open documents and of any file
-  that pyrefly's definitions point to (project files, libraries, standard-library stubs); whether a `.venv`
-  has `bin/python` and `bin/pyrefly` (`Scripts/python.exe` and `Scripts/pyrefly.exe` on Windows).
+  that pyrefly's definitions point to (project files, libraries, standard-library stubs); which `.venv`,
+  `venv` and `env` directories exist from the session directory up to the repository root and in the main
+  checkout of a worktree, with their `pyvenv.cfg`, `bin/python` and `bin/pyrefly` (`Scripts/python.exe`
+  and `Scripts/pyrefly.exe` on Windows).
 - **Reads environment variables**: the `PYREFLY_LSP_*` values that Claude Code fills in from the plugin
   settings; `PYREFLY_LSP_INDEXING_MODE`, which only the environment sets (an indexing mode other than
-  `lazy-blocking`, for troubleshooting); `VIRTUAL_ENV` and `CLAUDE_PROJECT_DIR`.
+  `lazy-blocking`, for troubleshooting); `VIRTUAL_ENV`, `CONDA_PREFIX` and `CLAUDE_PROJECT_DIR`.
 - **Does not** write files or make network requests. The proxy logs to the server's stderr
   (`claude --debug`).
 
@@ -97,7 +112,7 @@ python-lsp-server 1.15.0.
 
 - Claude Code 2.1.271 or later (choice lists in plugin settings).
 - `python3` 3.9+ on PATH: it runs the proxy. On an older one the proxy says so in the log.
-- `pyrefly` in the project's `.venv` (for example, as a dev dependency) or on PATH:
+- `pyrefly` in the project's environment (for example, as a dev dependency) or on PATH:
   `uv tool install pyrefly`. Tested with 1.4.1.
 
 ## Install
@@ -137,7 +152,7 @@ The new version loads in the next Claude Code session. What changed: see the
 | Type errors after edits | on | Turn off if a linter hook already reports them: navigation keeps working |
 | Sync with disk | on | Turn off only for troubleshooting |
 | Complete outgoing calls | on | Turn off only for troubleshooting |
-| Path to pyrefly | empty | By default, the first `.venv` with pyrefly: the project's, the repository root's, the main checkout's for a git worktree; then PATH |
+| Path to pyrefly | empty | By default, `pyrefly` from the project's `.venv`, `venv` or `env` up to the repository root, then the main checkout's for a git worktree, then PATH (see "Finding pyrefly" above) |
 | Indexing limit | 0 | How many project files pyrefly indexes; 0 keeps its default (2000). Higher gives more complete find-references on large projects but uses more memory: about 0.5 GB for 600 files |
 
 ## Project configuration
@@ -168,6 +183,15 @@ preset = "default"
 - Outgoing-call completion parses code with `ast` of the `python3` that runs the proxy. Syntax newer than its
   version (for example, `def f[T]` with python3 3.11) is not parsed: for such a file only pyrefly's answer is
   returned, and the log says so.
+- The search for pyrefly counts a directory the repository ignores as part of it, so a sandbox in the
+  project's `.tmp/` still finds the project's pyrefly. The flip side: with a dotfiles repository in `~`, a
+  pyrefly in `~/.venv` can be picked for a project under `~` that has none of its own. Set "Path to pyrefly"
+  to choose another.
+- pyrefly starts looking for an environment at its config's directory, while the proxy checks from the session
+  directory: an environment in a subdirectory below the config, where the session is, counts for the proxy
+  but not for pyrefly, so the proxy does not step in there and the server behaves like `pyrefly check`.
+- The `pythonPath` given to a git worktree applies to the whole session. A subproject below the session
+  directory with an environment of its own and a pyrefly config without an interpreter may get it too.
 - Tested on Linux with Python 3.12. Python 3.9 and Windows were not tested by running.
 
 ## License
