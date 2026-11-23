@@ -198,8 +198,8 @@ def test_worktree_without_environment_gets_the_main_checkout_interpreter(tmp_pat
     conda = tmp_path / "conda"
     _fake_executable(conda / "bin" / "python")
     assert _python_path(wt, {"CONDA_PREFIX": str(conda)}) is None
-    # An active environment pyrefly 1.4.1 would skip (measured) does not block the main checkout's: deleted, no
-    # interpreter, or a VIRTUAL_ENV without pyvenv.cfg or with only bin/python3.
+    # An active environment pyrefly 1.4.1 and 1.5.0 would skip (measured) does not block the main checkout's:
+    # deleted, no interpreter, or a VIRTUAL_ENV without pyvenv.cfg or with only bin/python3.
     no_python = tmp_path / "no_python"
     no_python.mkdir()
     no_cfg = tmp_path / "no_cfg"

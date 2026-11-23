@@ -9,10 +9,11 @@ bare server:
   with `lazy-blocking` indexing: find-references is complete from the first request;
 - disk sync: the server learns about files changed outside Claude (git, a formatter,
   another agent), and open documents get the text from disk;
-- an environment pyrefly would not find (a conda one, or the main checkout's for a worktree) as `pythonPath`;
+- an environment pyrefly may not find (a conda one, or the main checkout's for a worktree) as `pythonPath`;
+  Pixi environments, which pyrefly 1.5.0 takes itself, are not looked for;
 - type-checking mode for projects without a pyrefly config and the diagnostics switch come from plugin settings;
 - complete outgoing calls: pyrefly loses calls inside `await` and expressions
-  (facebook/pyrefly#5486); the proxy adds them using `ast` and go-to-definition.
+  (pyrefly-org/pyrefly#5486); the proxy adds them using `ast` and go-to-definition.
 
 Standard library only, Python 3.9+. Protocol on stdout, log on stderr.
 
@@ -282,7 +283,7 @@ def _first_existing(base: Path, *names: str) -> Path | None:
     return None
 
 
-# Interpreters pyrefly 1.4.1 looks for in an environment; conda on Windows also keeps python.exe at its root.
+# Interpreters pyrefly 1.4.1 and 1.5.0 look for in an environment; conda on Windows also keeps python.exe at its root.
 PYREFLY_INTERPRETERS = ("bin/python", "Scripts/python.exe")
 ANY_INTERPRETER = (*PYREFLY_INTERPRETERS, "bin/python3", "python.exe")
 
@@ -297,15 +298,15 @@ def _pyrefly_in(env_dir: Path) -> Path | None:
 
 
 def _pyrefly_takes(env_dir: Path) -> bool:
-    """An environment pyrefly 1.4.1 finds by itself (measured): a pyvenv.cfg and bin/python. A conda environment
-    made with `conda create -p .venv` has no pyvenv.cfg, and pyrefly passes it by."""
+    """An environment pyrefly 1.4.1 and 1.5.0 find by itself (measured): a pyvenv.cfg and bin/python. A conda
+    environment made with `conda create -p .venv` has no pyvenv.cfg, and pyrefly passes it by."""
     return _exists(env_dir / "pyvenv.cfg") and _first_existing(env_dir, *PYREFLY_INTERPRETERS) is not None
 
 
 def _active_environment(root: Path, env: Mapping[str, str]) -> bool:
-    """An active environment pyrefly 1.4.1 uses (measured): VIRTUAL_ENV that pyrefly takes, or CONDA_PREFIX with
-    an interpreter (conda's auto-activated base included). A stale value does not count; a relative one counts
-    from the project root, the server's working directory."""
+    """An active environment pyrefly 1.4.1 and 1.5.0 use (measured): VIRTUAL_ENV that pyrefly takes, or
+    CONDA_PREFIX with an interpreter (conda's auto-activated base included). A stale value does not count; a
+    relative one counts from the project root, the server's working directory."""
     venv, conda = env.get("VIRTUAL_ENV"), env.get("CONDA_PREFIX")
     if venv and _pyrefly_takes(root / venv):
         return True
@@ -354,14 +355,15 @@ def _env_dirs(chain: tuple[Path, ...]) -> list[Path]:
 
 
 def python_path_for(layout: Layout, env: Mapping[str, str]) -> str | None:
-    """pythonPath when pyrefly would find no environment by itself; None leaves the choice to pyrefly.
+    """pythonPath when nothing usable is active and pyrefly takes no .venv, venv or env; None leaves it to pyrefly.
 
     pyrefly picks the Python environment as for `pyrefly check`: an interpreter set in its config, an active
-    environment, then the nearest .venv, venv or env with pyvenv.cfg walking up from the project. The proxy steps
-    in only when nothing usable is active and pyrefly takes no environment between the session directory and the
+    environment, then the nearest .venv, venv or env with pyvenv.cfg walking up from the project or, from 1.5.0,
+    a Pixi environment (.pixi/envs/default; a venv wins in the same directory). The proxy steps in only when
+    nothing usable is active and pyrefly takes no .venv, venv or env between the session directory and the
     repository root: it passes the project's own environment that pyrefly passes by (a conda one, without
-    pyvenv.cfg), else, in a linked worktree, the main checkout's. pyrefly still prefers an interpreter set in
-    its config.
+    pyvenv.cfg), else, in a linked worktree, the main checkout's. It does not look for Pixi environments, so what
+    it passes wins over one. pyrefly still prefers an interpreter set in its config.
     """
     if _active_environment(layout.root, env):
         return None

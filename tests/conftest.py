@@ -185,7 +185,7 @@ class LspClient:
                 self.request("shutdown", {}, timeout=10)
                 self.notify("exit", {})
                 self.proc.wait(timeout=10)
-            except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired):
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
                 self.proc.kill()
 
 

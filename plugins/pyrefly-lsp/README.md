@@ -52,7 +52,7 @@ python-lsp-server 1.15.0.
 - **Indexing**: `pyrefly lsp --indexing-mode lazy-blocking`. The first request waits for the index, so the
   answer is complete.
 - **Outgoing calls**: pyrefly loses calls inside `await` and expressions
-  ([facebook/pyrefly#5486](https://github.com/facebook/pyrefly/issues/5486)). The proxy parses the function
+  ([pyrefly-org/pyrefly#5486](https://github.com/pyrefly-org/pyrefly/issues/5486)). The proxy parses the function
   body with `ast`, asks pyrefly for the definition of every call and merges the result with the server's
   reply.
 - **Disk sync**: in the background once a second (less often if walking the tree is slow: at most once per
@@ -66,14 +66,15 @@ python-lsp-server 1.15.0.
   a directory walk that skips virtual environments.
 - **Python environment**: pyrefly picks it itself, exactly as for `pyrefly check`: an interpreter set in its
   config, an active environment (`VIRTUAL_ENV`, `CONDA_PREFIX`, including conda's auto-activated base), else the
-  nearest `.venv`, `venv` or `env` with a `pyvenv.cfg` and `bin/python` above the project. The proxy steps in
-  only when pyrefly would find no environment: none usable is active (a stale `VIRTUAL_ENV` or `CONDA_PREFIX`
-  does not count) and pyrefly takes no `.venv`, `venv` or `env` between the session directory and the
-  repository root. Then the server gets an interpreter as `pythonPath`: the project's own environment that
+  nearest `.venv`, `venv` or `env` with a `pyvenv.cfg` and `bin/python` above the project or, from pyrefly
+  1.5.0, a Pixi environment `.pixi/envs/default` (a venv wins in the same directory). The proxy steps in
+  only when no usable environment is active (a stale `VIRTUAL_ENV` or `CONDA_PREFIX` does not count) and
+  pyrefly takes no `.venv`, `venv` or `env` between the session directory and the repository root. Then the server gets an interpreter as `pythonPath`: the project's own environment that
   pyrefly passes by (a conda one made with `conda create -p .venv` has no `pyvenv.cfg`), else, in a git
-  worktree, the main checkout's, from the session directory's counterpart up to its root. An interpreter set in
+  worktree, the main checkout's, from the session directory's counterpart up to its root. The proxy does not
+  look for Pixi environments: what it passes wins over a Pixi one pyrefly would take. An interpreter set in
   the pyrefly config still wins. In those cases the server deliberately differs from `pyrefly check`, which
-  would fall back to an environment above the repository or to `python3`. The main checkout comes from git:
+  would take a Pixi environment, one above the repository or `python3`. The main checkout comes from git:
   `core.worktree` (as in a submodule's worktree), else the directory holding `.git`; a bare repository and a
   `--separate-git-dir` repository have none.
 - **Finding pyrefly**: the "Path to pyrefly" setting; else `bin/pyrefly` from `.venv`, `venv` or `env`
@@ -113,7 +114,7 @@ python-lsp-server 1.15.0.
 - Claude Code 2.1.271 or later (choice lists in plugin settings).
 - `python3` 3.9+ on PATH: it runs the proxy. On an older one the proxy says so in the log.
 - `pyrefly` in the project's environment (for example, as a dev dependency) or on PATH:
-  `uv tool install pyrefly`. Tested with 1.4.1.
+  `uv tool install pyrefly`. Tested with 1.4.1 and 1.5.0.
 
 ## Install
 

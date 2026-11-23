@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1 — 2026-11-23
+
+- Tested with pyrefly 1.5.0: the tests pass. It treats `.venv`, `venv`, `env`, conda and active environments
+  the way 1.4.1 does, so the proxy passes `pythonPath` in the same cases. New in 1.5.0: pyrefly also takes a
+  Pixi environment (`.pixi/envs/default`) by itself. The proxy does not look for one: when it passes an
+  environment (a conda `.venv` without `pyvenv.cfg`, or the main checkout's in a worktree), that one wins
+  over Pixi. The README says so.
+- pyrefly 1.5.0 still loses outgoing calls inside `await` and expressions, so the proxy keeps adding them.
+- Links to pyrefly issues point to its new home, `pyrefly-org/pyrefly`.
+
 ## 1.1.0 — 2026-11-09
 
 - Documentation, plugin settings, log messages and code comments are in English.

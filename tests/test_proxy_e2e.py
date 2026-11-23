@@ -62,9 +62,10 @@ def test_outgoing_calls_left_to_server_when_disabled(
     root = make_project({"m.py": M_PY, "b.py": "def old_func() -> int:\n    return 1\n"})
     client = client_factory(root, env={"PYREFLY_LSP_COMPLETE_OUTGOING_CALLS": "false"})
     uri = client.open("m.py")
-    # Without completion the reply is only what pyrefly found itself (1.4.1 loses `return a() + b()`,
-    # facebook/pyrefly#5486); the proxy adds nothing extra.
-    assert set(_outgoing(client, uri, M_PY, "scaller")) <= {"helper×2", "helper×1"}
+    # Without completion the reply is only what pyrefly found itself: 1.4.1 and 1.5.0 lose both calls in
+    # `return helper() + helper()` (pyrefly-org/pyrefly#5486), while completion adds them. Once pyrefly finds
+    # them itself, this fails: then check whether completion is still needed.
+    assert _outgoing(client, uri, M_PY, "scaller") == []
 
 
 CALLS_PY = """class Box:

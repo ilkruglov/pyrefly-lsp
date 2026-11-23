@@ -1,6 +1,6 @@
 {
   "name": "pyrefly-lsp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Python LSP on pyrefly: complete find-references and outgoing calls, sync with disk, git worktrees without their own .venv. Install the pyrefly binary separately: uv tool install pyrefly.",
   "author": {
     "name": "ilkruglov"
@@ -46,7 +46,7 @@
     "complete_outgoing_calls": {
       "type": "boolean",
       "title": "Complete outgoing calls",
-      "description": "Add the calls pyrefly loses inside await and expressions (facebook/pyrefly#5486). Turn off only for troubleshooting.",
+      "description": "Add the calls pyrefly loses inside await and expressions (pyrefly-org/pyrefly#5486). Turn off only for troubleshooting.",
       "default": true
     },
     "pyrefly_path": {
