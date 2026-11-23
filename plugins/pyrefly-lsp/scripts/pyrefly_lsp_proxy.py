@@ -9,8 +9,8 @@ bare server:
   with `lazy-blocking` indexing: find-references is complete from the first request;
 - disk sync: the server learns about files changed outside Claude (git, a formatter,
   another agent), and open documents get the text from disk;
-- an environment pyrefly may not find (a conda one, or the main checkout's for a worktree) as `pythonPath`;
-  Pixi environments, which pyrefly 1.5.0 takes itself, are not looked for;
+- as `pythonPath`, a project environment pyrefly passes by (a conda `.venv` without pyvenv.cfg) or, in a worktree,
+  the main checkout's; Pixi environments, which pyrefly 1.5.0 takes itself, are not looked for;
 - type-checking mode for projects without a pyrefly config and the diagnostics switch come from plugin settings;
 - complete outgoing calls: pyrefly loses calls inside `await` and expressions
   (pyrefly-org/pyrefly#5486); the proxy adds them using `ast` and go-to-definition.
@@ -283,9 +283,18 @@ def _first_existing(base: Path, *names: str) -> Path | None:
     return None
 
 
-# Interpreters pyrefly 1.4.1 and 1.5.0 look for in an environment; conda on Windows also keeps python.exe at its root.
-PYREFLY_INTERPRETERS = ("bin/python", "Scripts/python.exe")
-ANY_INTERPRETER = (*PYREFLY_INTERPRETERS, "bin/python3", "python.exe")
+# Only this platform's environment layout counts, as in pyrefly 1.4.1 and 1.5.0: an environment made by Windows
+# Python (as in WSL on a project under /mnt/c) is none elsewhere, and the reverse. PYREFLY_INTERPRETER is the one
+# pyrefly looks for in a venv; ANY_INTERPRETER adds conda's: bin/python3 outside Windows, python.exe at the root
+# on Windows.
+if os.name == "nt":
+    PYREFLY_INTERPRETER = "Scripts/python.exe"
+    ANY_INTERPRETER = (PYREFLY_INTERPRETER, "python.exe")
+    PYREFLY_BINARY = "Scripts/pyrefly.exe"
+else:
+    PYREFLY_INTERPRETER = "bin/python"
+    ANY_INTERPRETER = (PYREFLY_INTERPRETER, "bin/python3")
+    PYREFLY_BINARY = "bin/pyrefly"
 
 
 def _interpreter_in(env_dir: Path) -> Path | None:
@@ -294,13 +303,14 @@ def _interpreter_in(env_dir: Path) -> Path | None:
 
 
 def _pyrefly_in(env_dir: Path) -> Path | None:
-    return _first_existing(env_dir, "bin/pyrefly", "Scripts/pyrefly.exe")
+    return _first_existing(env_dir, PYREFLY_BINARY)
 
 
 def _pyrefly_takes(env_dir: Path) -> bool:
-    """An environment pyrefly 1.4.1 and 1.5.0 find by itself (measured): a pyvenv.cfg and bin/python. A conda
-    environment made with `conda create -p .venv` has no pyvenv.cfg, and pyrefly passes it by."""
-    return _exists(env_dir / "pyvenv.cfg") and _first_existing(env_dir, *PYREFLY_INTERPRETERS) is not None
+    """An environment pyrefly 1.4.1 and 1.5.0 find by itself (measured): a pyvenv.cfg and bin/python
+    (Scripts/python.exe on Windows). A conda environment made with `conda create -p .venv` has no pyvenv.cfg, and
+    pyrefly passes it by."""
+    return _exists(env_dir / "pyvenv.cfg") and _exists(env_dir / PYREFLY_INTERPRETER)
 
 
 def _active_environment(root: Path, env: Mapping[str, str]) -> bool:
@@ -355,7 +365,7 @@ def _env_dirs(chain: tuple[Path, ...]) -> list[Path]:
 
 
 def python_path_for(layout: Layout, env: Mapping[str, str]) -> str | None:
-    """pythonPath when nothing usable is active and pyrefly takes no .venv, venv or env; None leaves it to pyrefly.
+    """pythonPath for the server, or None to leave the choice to pyrefly.
 
     pyrefly picks the Python environment as for `pyrefly check`: an interpreter set in its config, an active
     environment, then the nearest .venv, venv or env with pyvenv.cfg walking up from the project or, from 1.5.0,
@@ -933,7 +943,10 @@ class Proxy:
             return
         python_path = python_path_for(layout, self.env)
         if python_path:
-            log(f"pyrefly would find no Python environment here: passing {python_path} as pythonPath")
+            log(
+                "nothing usable is active and pyrefly takes no .venv, venv or env here: "
+                f"passing {python_path} as pythonPath"
+            )
         params["initializationOptions"] = init_options(params.get("initializationOptions"), self.settings, python_path)
         threading.Thread(target=self.from_server, daemon=True).start()
         self.to_server({**msg, "params": params})

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.2 — 2026-11-23
+
+- The proxy recognizes an environment by this platform's layout only: outside Windows `bin/python` or
+  `bin/python3` and `bin/pyrefly`; on Windows `Scripts/python.exe` or conda's root `python.exe`, and
+  `Scripts/pyrefly.exe`. A venv counts as one pyrefly takes only with `bin/python` (`Scripts/python.exe`).
+  pyrefly does the same, so an environment made by Windows Python, as in WSL on a project under `/mnt/c`, is
+  none on Linux. Before, such an environment in `VIRTUAL_ENV` or `CONDA_PREFIX`, or as a worktree's own
+  `.venv`, kept the proxy from passing the main checkout's interpreter; in the project's `.venv`, `venv` or
+  `env`, its `Scripts/pyrefly.exe` could be started as the server.
+
 ## 1.1.1 — 2026-11-23
 
 - Tested with pyrefly 1.5.0: the tests pass. It treats `.venv`, `venv`, `env`, conda and active environments

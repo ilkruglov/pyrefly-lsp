@@ -66,21 +66,23 @@ python-lsp-server 1.15.0.
   a directory walk that skips virtual environments.
 - **Python environment**: pyrefly picks it itself, exactly as for `pyrefly check`: an interpreter set in its
   config, an active environment (`VIRTUAL_ENV`, `CONDA_PREFIX`, including conda's auto-activated base), else the
-  nearest `.venv`, `venv` or `env` with a `pyvenv.cfg` and `bin/python` above the project or, from pyrefly
-  1.5.0, a Pixi environment `.pixi/envs/default` (a venv wins in the same directory). The proxy steps in
-  only when no usable environment is active (a stale `VIRTUAL_ENV` or `CONDA_PREFIX` does not count) and
-  pyrefly takes no `.venv`, `venv` or `env` between the session directory and the repository root. Then the server gets an interpreter as `pythonPath`: the project's own environment that
-  pyrefly passes by (a conda one made with `conda create -p .venv` has no `pyvenv.cfg`), else, in a git
-  worktree, the main checkout's, from the session directory's counterpart up to its root. The proxy does not
-  look for Pixi environments: what it passes wins over a Pixi one pyrefly would take. An interpreter set in
-  the pyrefly config still wins. In those cases the server deliberately differs from `pyrefly check`, which
-  would take a Pixi environment, one above the repository or `python3`. The main checkout comes from git:
-  `core.worktree` (as in a submodule's worktree), else the directory holding `.git`; a bare repository and a
-  `--separate-git-dir` repository have none.
-- **Finding pyrefly**: the "Path to pyrefly" setting; else `bin/pyrefly` from `.venv`, `venv` or `env`
-  directories with an interpreter (no `pyvenv.cfg` needed) from the session directory up to the repository
-  root (outside git, the session directory only),
-  then from the main checkout's counterparts; else PATH, where activating an environment puts its `bin` first.
+  nearest `.venv`, `venv` or `env` with a `pyvenv.cfg` and `bin/python` (`Scripts/python.exe` on Windows) or,
+  from pyrefly 1.5.0, a Pixi environment `.pixi/envs/default` (a venv wins in the same directory), walking up
+  from the project. The proxy steps in only when no usable environment is active (a stale `VIRTUAL_ENV` or
+  `CONDA_PREFIX` does not count) and pyrefly takes no `.venv`, `venv` or `env` between the session directory
+  and the repository root. Then the server gets an interpreter as `pythonPath`: the project's own environment
+  that pyrefly passes by (a conda one made with `conda create -p .venv` has no `pyvenv.cfg`), else, in a git
+  worktree, the main checkout's, from the session directory's counterpart up to its root. With neither,
+  pyrefly decides. An environment laid out for another platform, such as a Windows-made one seen from WSL,
+  counts as none, as it does for pyrefly. When the proxy passes an interpreter, the server deliberately
+  differs from `pyrefly check`, which would take a Pixi environment (the proxy does not look for them), one
+  above the repository or `python3`; only an interpreter set in the pyrefly config still wins. The main
+  checkout comes from git: `core.worktree` (as in a submodule's worktree), else the directory holding `.git`;
+  a bare repository and a `--separate-git-dir` repository have none.
+- **Finding pyrefly**: the "Path to pyrefly" setting; else `bin/pyrefly` (`Scripts/pyrefly.exe` on Windows)
+  from `.venv`, `venv` or `env` directories with an interpreter (no `pyvenv.cfg` needed) from the session
+  directory up to the repository root (outside git, the session directory only), then from the main
+  checkout's counterparts; else PATH, where activating an environment puts its `bin` first.
   Nothing above the repository and no active environment comes before the project's own pyrefly, so an old
   pyrefly in conda's auto-activated base cannot shadow the one pinned in the project.
 - **Large trees**: the proxy watches unopened files only if `git ls-files` lists at most 50,000 `.py`, `.pyi`
@@ -101,8 +103,9 @@ python-lsp-server 1.15.0.
 - **Reads** sizes and modification times of the watched files; the text of open documents and of any file
   that pyrefly's definitions point to (project files, libraries, standard-library stubs); which `.venv`,
   `venv` and `env` directories exist from the session directory up to the repository root and in the main
-  checkout of a worktree, with their `pyvenv.cfg`, `bin/python` and `bin/pyrefly` (`Scripts/python.exe`
-  and `Scripts/pyrefly.exe` on Windows).
+  checkout of a worktree, with their `pyvenv.cfg`, `bin/python`, `bin/python3` and `bin/pyrefly`
+  (`Scripts/python.exe`, `python.exe` and `Scripts/pyrefly.exe` on Windows); the same for the `VIRTUAL_ENV`
+  and `CONDA_PREFIX` directories.
 - **Reads environment variables**: the `PYREFLY_LSP_*` values that Claude Code fills in from the plugin
   settings; `PYREFLY_LSP_INDEXING_MODE`, which only the environment sets (an indexing mode other than
   `lazy-blocking`, for troubleshooting); `VIRTUAL_ENV`, `CONDA_PREFIX` and `CLAUDE_PROJECT_DIR`.

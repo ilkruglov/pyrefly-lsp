@@ -239,6 +239,37 @@ def test_an_environment_is_a_known_directory_with_an_interpreter(tmp_path: Path)
     assert _python_path(wt) is None
 
 
+def _windows_environment(path: Path) -> Path:
+    """An environment made by Windows Python: Scripts/python.exe and Scripts/pyrefly.exe next to pyvenv.cfg, and
+    python.exe at the root, where conda keeps it."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "pyvenv.cfg").write_text("home = C:\\Python313\n")
+    _fake_executable(path / "Scripts" / "python.exe")
+    _fake_executable(path / "Scripts" / "pyrefly.exe")
+    _fake_executable(path / "python.exe")
+    return path
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the layout of another platform is tested outside Windows")
+@pytest.mark.usefixtures("confined")
+def test_an_environment_laid_out_for_windows_does_not_count_elsewhere(tmp_path: Path) -> None:
+    # pyrefly 1.4.1 and 1.5.0 outside Windows look for bin/python, in conda also bin/python3 (their venv.rs and
+    # conda.rs pick the layout by platform). A Windows-made environment, as in WSL on a project under /mnt/c, is
+    # none here: not one pyrefly takes, not an interpreter for the server, not a source of the pyrefly binary.
+    main, wt = _repo_with_worktree(tmp_path)
+    main_env = _venv(main / ".venv", pyrefly=True)
+    main_pyrefly = str((main_env / "bin" / "pyrefly").resolve())
+    windows = _windows_environment(tmp_path / "windows")
+    assert _python_path(wt, {"VIRTUAL_ENV": str(windows)}) == _python(main_env)
+    assert _python_path(wt, {"CONDA_PREFIX": str(windows)}) == _python(main_env)
+    _windows_environment(wt / ".venv")
+    assert _python_path(wt) == _python(main_env)
+    assert _pyrefly(wt) == main_pyrefly
+    # With bin/python the worktree's environment becomes a candidate, yet its Scripts/pyrefly.exe is no binary here.
+    _fake_executable(wt / ".venv" / "bin" / "python")
+    assert _pyrefly(wt) == main_pyrefly
+
+
 @pytest.mark.usefixtures("confined")
 def test_core_worktree_with_a_home_relative_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # git expands "~" in core.worktree; a submodule's git dir is not named .git, so nothing else finds it.
