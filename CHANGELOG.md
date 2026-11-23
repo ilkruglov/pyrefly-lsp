@@ -22,12 +22,8 @@
 
 ## 1.1.0 — 2026-11-09
 
-- Documentation, plugin settings, log messages and code comments are in English.
-- The full README now lives in the plugin folder, next to the manifest; the repository README is a short
-  overview.
-- The README lists what the plugin runs and reads, and states the watched configs, the worktree conditions
-  and the file limit for watching exactly as the code does; it also says when a request reuses a recent
-  background scan and gives the full lookup order for `pyrefly`.
+- The README also says when a request reuses a recent background scan and gives the full lookup order for
+  `pyrefly`.
 - The 50,000-file limit for watching in git counts only the files that are watched: names that merely end
   like a config, such as `backup-setup.cfg`, no longer count toward it.
 - The server gets an interpreter as `pythonPath` only when pyrefly would find no environment by itself: none
@@ -43,6 +39,14 @@
 - The main checkout of a worktree comes from git's `core.worktree` (a submodule's worktree, including with
   `extensions.worktreeConfig`, a `~` path or an included config file); bare repositories have none. git itself
   parses these values. No longer needs git 2.31 (`--path-format`); works with a session opened through a symlink.
+
+## 1.0.1 — 2026-11-09
+
+- Documentation, plugin settings, log messages and code comments are in English.
+- The full README now lives in the plugin folder, next to the manifest; the repository README is a short
+  overview.
+- The README lists what the plugin runs and reads, and states the watched configs, the worktree conditions
+  and the file limit for watching exactly as the code does.
 
 ## 1.0.0 — 2026-11-09
 
@@ -73,6 +77,11 @@ pyrefly 1.4.1 (the plugin README says how):
 - The proxy runs as `python3 -I`: project files and `PYTHONPATH` cannot shadow its modules.
 - `workspaceFolder` and `startupTimeout` in the server config.
 - Tests: unit tests for the proxy and end-to-end tests with real pyrefly.
+
+## 0.2.0 — 2026-11-09
+
+- The proxy from 1.0.0, released earlier the same day under this number; renumbered to 1.0.0 to match the size
+  of the change. See 1.0.0.
 
 ## 0.1.0 — 2026-11-08
 
